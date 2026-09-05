@@ -1,4 +1,4 @@
-package com.vhronin.keyframedb.ui.theme
+package com.vhronin.keyframedb.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
