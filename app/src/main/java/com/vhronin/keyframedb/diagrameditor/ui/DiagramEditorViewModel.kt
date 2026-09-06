@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 data class DiagramEditorUiState(
     val projectName: String = "",
@@ -63,6 +64,22 @@ class DiagramEditorViewModel(
         )
     }
 
+    /** Отпустили таблицу — примагничиваем её к ближайшей точке сетки. */
+    fun onTableDragEnd(tableId: String) {
+        _uiState.value = _uiState.value.copy(
+            tables = _uiState.value.tables.map { table ->
+                if (table.id == tableId) {
+                    table.copy(x = snapToGrid(table.x), y = snapToGrid(table.y))
+                } else {
+                    table
+                }
+            }
+        )
+    }
+
+    private fun snapToGrid(value: Float): Float =
+        (value / GRID_STEP).roundToInt() * GRID_STEP
+
     fun onBackClick() {
         viewModelScope.launch {
             _navigationEvents.send(DiagramEditorNavigationEvent.NavigateBack)
@@ -83,5 +100,10 @@ class DiagramEditorViewModel(
 
     fun onAddRelationClick() {
         // Пока без реализации — появится вместе с рисованием связи между таблицами
+    }
+
+    companion object {
+        /** Шаг сетки в dp. Должен совпадать с шагом точек на холсте (DiagramEditorScreen). */
+        const val GRID_STEP = 16f
     }
 }

@@ -1,9 +1,10 @@
 package com.vhronin.keyframedb.diagrameditor.ui
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,10 +26,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -49,13 +56,18 @@ import com.vhronin.keyframedb.theme.KeyframeDBExtendedTheme
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
 
-private val TableCardWidth = 140.dp
-private val TableHeaderHeight = 34.dp
-private val TableRowHeight = 30.dp
-private val DotGridStep = 16.dp
+// Ширина/высота таблиц выражены в "точках" сетки, а не в произвольных dp —
+// это и есть то, к чему таблицы примагничиваются при перетаскивании (см. GRID_STEP в ViewModel).
+private val DotGridStep = DiagramEditorViewModel.GRID_STEP.dp
 private val DotRadius = 1.1.dp
+private const val TableWidthDots = 9
+private const val TableHeaderDots = 2
+private const val TableRowDots = 2
 
-private fun tableHeight(columnCount: Int): Dp = TableHeaderHeight + TableRowHeight * columnCount
+private val TableCardWidth = DotGridStep * TableWidthDots
+
+private fun tableHeight(columnCount: Int): Dp =
+    DotGridStep * (TableHeaderDots + TableRowDots * columnCount)
 
 @Composable
 fun DiagramEditorScreen(
@@ -98,6 +110,7 @@ fun DiagramEditorScreen(
                     tables = uiState.tables,
                     relationships = uiState.relationships,
                     onTableDrag = viewModel::onTableDrag,
+                    onTableDragEnd = viewModel::onTableDragEnd,
                     modifier = Modifier.fillMaxSize()
                 )
 
@@ -173,6 +186,7 @@ private fun DiagramCanvas(
     tables: List<TableEntity>,
     relationships: List<Relationship>,
     onTableDrag: (tableId: String, dx: Float, dy: Float) -> Unit,
+    onTableDragEnd: (tableId: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val dotColor = MaterialTheme.colorScheme.outline
@@ -192,11 +206,14 @@ private fun DiagramCanvas(
             } else {
                 KeyframeDBExtendedTheme.colors.accent2
             }
-            TableCard(
-                table = table,
-                accentColor = accentColor,
-                onDrag = { dx, dy -> onTableDrag(table.id, dx, dy) }
-            )
+            key(table.id) {
+                TableCard(
+                    table = table,
+                    accentColor = accentColor,
+                    onDrag = { dx, dy -> onTableDrag(table.id, dx, dy) },
+                    onDragEnd = { onTableDragEnd(table.id) }
+                )
+            }
         }
     }
 }
@@ -290,19 +307,38 @@ private fun TableCard(
     table: TableEntity,
     accentColor: Color,
     onDrag: (dx: Float, dy: Float) -> Unit,
+    onDragEnd: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
+    var isDragging by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(targetValue = if (isDragging) 1.06f else 1f, label = "tableScale")
 
     Column(
         modifier = modifier
             .offset(x = table.x.dp, y = table.y.dp)
             .width(TableCardWidth)
+            .scale(scale)
+            .shadow(
+                elevation = if (isDragging) 10.dp else 0.dp,
+                shape = RoundedCornerShape(13.dp)
+            )
             .clip(RoundedCornerShape(13.dp))
             .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(13.dp))
+            .border(
+                width = if (isDragging) 1.5.dp else 1.dp,
+                color = if (isDragging) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                shape = RoundedCornerShape(13.dp)
+            )
             .pointerInput(table.id) {
-                detectDragGestures { change, dragAmount ->
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { isDragging = true },
+                    onDragEnd = {
+                        isDragging = false
+                        onDragEnd()
+                    },
+                    onDragCancel = { isDragging = false }
+                ) { change, dragAmount ->
                     change.consume()
                     with(density) {
                         onDrag(dragAmount.x.toDp().value, dragAmount.y.toDp().value)

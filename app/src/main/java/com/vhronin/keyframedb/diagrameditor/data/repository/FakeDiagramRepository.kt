@@ -24,8 +24,8 @@ class FakeDiagramRepository : DiagramRepository {
                 TableEntity(
                     id = "users",
                     name = "users",
-                    x = 14f,
-                    y = 18f,
+                    x = 16f,
+                    y = 16f,
                     columns = listOf(
                         TableColumn(id = "1", name = "id", type = "uuid", isPrimaryKey = true),
                         TableColumn(id = "2", name = "email", type = "varchar"),
@@ -36,7 +36,7 @@ class FakeDiagramRepository : DiagramRepository {
                     id = "orders",
                     name = "orders",
                     x = 96f,
-                    y = 172f,
+                    y = 176f,
                     columns = listOf(
                         TableColumn(id = "1", name = "id", type = "uuid", isPrimaryKey = true),
                         TableColumn(id = "2", name = "user_id", type = "uuid", isForeignKey = true),
