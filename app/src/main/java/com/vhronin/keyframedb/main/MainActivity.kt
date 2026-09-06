@@ -12,6 +12,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.navigation.compose.rememberNavController
+import com.vhronin.keyframedb.diagrameditor.ui.DiagramEditorScreen
+import com.vhronin.keyframedb.navigation.KeyframeDBNavHost
 import com.vhronin.keyframedb.projectlist.ui.ProjectListScreen
 import com.vhronin.keyframedb.theme.KeyframeDBTheme
 
@@ -21,11 +24,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             KeyframeDBTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Column(modifier = Modifier.padding(innerPadding)) {
-                        ProjectListScreen()
-                    }
-                }
+                val navController = rememberNavController()
+                KeyframeDBNavHost(navController)
             }
         }
     }
@@ -34,9 +34,7 @@ class MainActivity : ComponentActivity() {
 @Preview(showBackground = true)
 @Composable
 fun MyPreview() {
-    Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-        Column(modifier = Modifier.padding(innerPadding)) {
-            ProjectListScreen()
-        }
+    KeyframeDBTheme {
+        DiagramEditorScreen()
     }
 }

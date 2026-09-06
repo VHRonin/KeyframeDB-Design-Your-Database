@@ -8,6 +8,8 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -37,6 +39,41 @@ object KeyframeDBColors {
     val Accent2Dark = Color(0xFF06B88A)
     val Accent2SoftDark = Color(0xFF14473C)
 }
+
+// ---- Токены, которых нет в стандартной Material3 ColorScheme.
+// "Line" сюда не включаем — он уже корректно переключается через
+// MaterialTheme.colorScheme.outline (см. LightColorScheme/DarkColorScheme ниже). ----
+data class KeyframeDBExtendedColors(
+    val inkMuted: Color,
+    val inkFaint: Color,
+    val accentSoft: Color,
+    val accent2: Color,
+    val accent2Soft: Color
+)
+
+private val LightExtendedColors = KeyframeDBExtendedColors(
+    inkMuted = KeyframeDBColors.InkMuted,
+    inkFaint = KeyframeDBColors.InkFaint,
+    accentSoft = KeyframeDBColors.AccentSoft,
+    accent2 = KeyframeDBColors.Accent2,
+    accent2Soft = KeyframeDBColors.Accent2Soft
+)
+
+private val DarkExtendedColors = KeyframeDBExtendedColors(
+    inkMuted = KeyframeDBColors.InkMutedDark,
+    inkFaint = KeyframeDBColors.InkFaintDark,
+    accentSoft = KeyframeDBColors.AccentSoftDark,
+    accent2 = KeyframeDBColors.Accent2Dark,
+    accent2Soft = KeyframeDBColors.Accent2SoftDark
+)
+
+val LocalKeyframeDBExtendedColors = staticCompositionLocalOf { LightExtendedColors }
+
+object KeyframeDBExtendedTheme {
+    val colors: KeyframeDBExtendedColors
+        @Composable get() = LocalKeyframeDBExtendedColors.current
+}
+
 
 // TODO: подключить настоящие шрифты (Space Grotesk для заголовков, Inter для UI)
 // через res/font — пока системные, чтобы не блокировать вёрстку экрана.
@@ -80,9 +117,13 @@ fun KeyframeDBTheme(
         else -> LightColorScheme
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = KeyframeDBTypography,
-        content = content
-    )
+    val extendedColors = if (darkTheme) DarkExtendedColors else LightExtendedColors
+
+    CompositionLocalProvider(LocalKeyframeDBExtendedColors provides extendedColors) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = KeyframeDBTypography,
+            content = content
+        )
+    }
 }

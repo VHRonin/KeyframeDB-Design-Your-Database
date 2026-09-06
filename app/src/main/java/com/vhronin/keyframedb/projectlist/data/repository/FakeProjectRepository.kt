@@ -8,7 +8,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 /**
  * Временная реализация в памяти — заглушка на этапе, пока не готов
  * data-слой с реальным хранением (JSON-файл проекта на диске).
- * Данные соответствуют HTML-мокапу главного экрана.
  */
 class FakeProjectRepository : ProjectRepository {
 
