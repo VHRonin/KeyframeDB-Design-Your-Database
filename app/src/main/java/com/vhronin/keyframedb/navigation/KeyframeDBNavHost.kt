@@ -10,10 +10,14 @@ import com.vhronin.keyframedb.diagrameditor.ui.DiagramEditorScreen
 import com.vhronin.keyframedb.projectlist.ui.ProjectListScreen
 
 @Composable
-fun KeyframeDBNavHost(navController: NavHostController){
-    NavHost(startDestination = Destination.ProjectList.name, navController = navController){
-        composable(Destination.ProjectList.name){
-            ProjectListScreen()
+fun KeyframeDBNavHost(navController: NavHostController) {
+    NavHost(startDestination = Destination.ProjectList.name, navController = navController) {
+        composable(Destination.ProjectList.name) {
+            ProjectListScreen(
+                onNavigateToEditor = { projectId ->
+                    navController.navigate(Destination.DiagramEditor.createRoute(projectId))
+                }
+            )
         }
 
         composable(
@@ -23,10 +27,13 @@ fun KeyframeDBNavHost(navController: NavHostController){
                 nullable = true
                 defaultValue = null
             })
-        ){ backStackEntry ->
+        ) { backStackEntry ->
             val projectId = backStackEntry.arguments?.getString("projectId")
 
-            DiagramEditorScreen(projectId = projectId ?: "1")
+            DiagramEditorScreen(
+                projectId = projectId ?: "1",
+                onNavigateBack = { navController.popBackStack() }
+            )
         }
     }
 }

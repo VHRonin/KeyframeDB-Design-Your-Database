@@ -4,9 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vhronin.keyframedb.projectlist.domain.model.Project
 import com.vhronin.keyframedb.projectlist.domain.usecase.GetProjectsUseCase
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 
 data class ProjectListUiState(
@@ -22,12 +25,23 @@ data class ProjectListUiState(
         }
 }
 
+/**
+ * Одноразовые события навигации. ViewModel ничего не знает про NavController —
+ * она просто сообщает "открой редактор" / "куда-то перейди", а экран решает как.
+ */
+sealed interface ProjectListNavigationEvent {
+    data class OpenEditor(val projectId: String?) : ProjectListNavigationEvent
+}
+
 class ProjectListViewModel(
     private val getProjects: GetProjectsUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ProjectListUiState(isLoading = true))
     val uiState: StateFlow<ProjectListUiState> = _uiState.asStateFlow()
+
+    private val _navigationEvents = Channel<ProjectListNavigationEvent>(Channel.BUFFERED)
+    val navigationEvents: Flow<ProjectListNavigationEvent> = _navigationEvents.receiveAsFlow()
 
     init {
         viewModelScope.launch {
@@ -42,10 +56,14 @@ class ProjectListViewModel(
     }
 
     fun onCreateProjectClick() {
-        // Пока без реализации — здесь появится переход к созданию проекта / в редактор
+        viewModelScope.launch {
+            _navigationEvents.send(ProjectListNavigationEvent.OpenEditor(projectId = null))
+        }
     }
 
     fun onProjectClick(project: Project) {
-        // Пока без реализации — здесь появится переход в редактор конкретного проекта
+        viewModelScope.launch {
+            _navigationEvents.send(ProjectListNavigationEvent.OpenEditor(projectId = project.id))
+        }
     }
 }

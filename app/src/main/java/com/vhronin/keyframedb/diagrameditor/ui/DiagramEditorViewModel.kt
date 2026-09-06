@@ -5,9 +5,12 @@ import androidx.lifecycle.viewModelScope
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.GetDiagramUseCase
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 
 data class DiagramEditorUiState(
@@ -18,6 +21,11 @@ data class DiagramEditorUiState(
     val isLoading: Boolean = false
 )
 
+/** Одноразовые события навигации — по той же схеме, что и в ProjectListViewModel. */
+sealed interface DiagramEditorNavigationEvent {
+    data object NavigateBack : DiagramEditorNavigationEvent
+}
+
 class DiagramEditorViewModel(
     private val projectId: String,
     private val getDiagram: GetDiagramUseCase
@@ -25,6 +33,9 @@ class DiagramEditorViewModel(
 
     private val _uiState = MutableStateFlow(DiagramEditorUiState(isLoading = true))
     val uiState: StateFlow<DiagramEditorUiState> = _uiState.asStateFlow()
+
+    private val _navigationEvents = Channel<DiagramEditorNavigationEvent>(Channel.BUFFERED)
+    val navigationEvents: Flow<DiagramEditorNavigationEvent> = _navigationEvents.receiveAsFlow()
 
     init {
         viewModelScope.launch {
@@ -53,7 +64,9 @@ class DiagramEditorViewModel(
     }
 
     fun onBackClick() {
-        // Пока без реализации — здесь появится переход назад к списку проектов
+        viewModelScope.launch {
+            _navigationEvents.send(DiagramEditorNavigationEvent.NavigateBack)
+        }
     }
 
     fun onUndoClick() {

@@ -22,6 +22,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -59,9 +60,18 @@ private fun tableHeight(columnCount: Int): Dp = TableHeaderHeight + TableRowHeig
 @Composable
 fun DiagramEditorScreen(
     projectId: String = "1",
+    onNavigateBack: () -> Unit = {},
     viewModel: DiagramEditorViewModel = koinViewModel(parameters = { parametersOf(projectId) })
 ) {
     val uiState by viewModel.uiState.collectAsState()
+
+    LaunchedEffect(Unit) {
+        viewModel.navigationEvents.collect { event ->
+            when (event) {
+                DiagramEditorNavigationEvent.NavigateBack -> onNavigateBack()
+            }
+        }
+    }
 
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
         Column(
