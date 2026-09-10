@@ -3,6 +3,7 @@ package com.vhronin.keyframedb.diagrameditor.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
+import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColumn
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.GetDiagramUseCase
@@ -19,6 +20,21 @@ import kotlin.math.roundToInt
 /** Какой именно атрибут какой таблицы сейчас редактируется в BottomSheet. */
 data class EditingColumnRef(val tableId: String, val columnId: String)
 
+/**
+ * Режим выбора таблиц для новой связи.
+ * fromTableId == null, пока не выбрали первую таблицу (запуск с кнопки на тулбаре, без
+ * заранее известного источника) — как только выбрали, дальше ждём тап по второй таблице
+ * (запуск из меню конкретной таблицы сразу приходит с уже известным fromTableId).
+ */
+data class LinkingState(val fromTableId: String? = null)
+
+/** Обе таблицы для новой связи уже выбраны — осталось подтвердить вид связи в BottomSheet. */
+data class PendingRelationship(
+    val fromTableId: String,
+    val toTableId: String,
+    val type: RelationshipType = RelationshipType.ONE_TO_MANY
+)
+
 data class DiagramEditorUiState(
     val projectName: String = "",
     val isSaved: Boolean = true,
@@ -32,6 +48,12 @@ data class DiagramEditorUiState(
     // Таблица, для которой сейчас включён режим редактирования атрибутов
     // (кнопки удаления атрибута и добавления атрибута видны только пока это её id).
     val attributeEditingTableId: String? = null,
+    // Режим создания новой связи — null, если сейчас не создаём (см. LinkingState выше).
+    val linkingState: LinkingState? = null,
+    // Обе таблицы для новой связи выбраны — открыт BottomSheet выбора вида связи.
+    val pendingRelationship: PendingRelationship? = null,
+    // Существующая связь, которую сейчас редактируют/удаляют (тап по подписи на холсте).
+    val editingRelationshipId: String? = null,
     val renamingTableId: String? = null,
     val editingColumn: EditingColumnRef? = null
 )
@@ -107,8 +129,13 @@ class DiagramEditorViewModel(
         _uiState.value = _uiState.value.copy(tables = _uiState.value.tables + newTable)
     }
 
+    /** Кнопка "Связь" на тулбаре — то же самое, но без заранее известной первой таблицы. */
     fun onAddRelationClick() {
-        // Пока без реализации — появится вместе с рисованием связи между таблицами
+        _uiState.value = _uiState.value.copy(
+            linkingState = LinkingState(),
+            selectedTableId = null,
+            hasDraggedSinceSelection = false
+        )
     }
 
     /**
@@ -128,6 +155,10 @@ class DiagramEditorViewModel(
 
     /** Тап по пустому месту холста — снимаем выделение и выключаем редактирование атрибутов. */
     fun onCanvasTap() {
+        if (_uiState.value.linkingState != null) {
+            onCancelLinking()
+            return
+        }
         _uiState.value = _uiState.value.copy(
             selectedTableId = null,
             hasDraggedSinceSelection = false,
@@ -156,8 +187,97 @@ class DiagramEditorViewModel(
         onRenameDismiss()
     }
 
+    /** Кнопка "Связь" в плавающем меню — входим в режим связывания с уже известной первой таблицей. */
     fun onBuildRelationshipClick(tableId: String) {
-        // Пока без реализации — следующий шаг: рисование связи от конкретной таблицы
+        _uiState.value = _uiState.value.copy(
+            linkingState = LinkingState(fromTableId = tableId),
+            selectedTableId = null,
+            hasDraggedSinceSelection = false
+        )
+    }
+
+    /**
+     * Тап по таблице во время режима связывания.
+     * Если первую таблицу ещё не выбрали (запуск с тулбара) — запоминаем её и ждём вторую.
+     * Тап по той же таблице, с которой начали — отмена. Тап по другой — обе таблицы выбраны,
+     * открываем BottomSheet подтверждения вида связи (см. PendingRelationship).
+     */
+    fun onLinkTableTap(tableId: String) {
+        val linking = _uiState.value.linkingState ?: return
+        val fromTableId = linking.fromTableId
+        if (fromTableId == null) {
+            _uiState.value = _uiState.value.copy(linkingState = linking.copy(fromTableId = tableId))
+            return
+        }
+        if (tableId == fromTableId) {
+            onCancelLinking()
+            return
+        }
+        _uiState.value = _uiState.value.copy(
+            linkingState = null,
+            pendingRelationship = PendingRelationship(fromTableId = fromTableId, toTableId = tableId)
+        )
+    }
+
+    /** Отмена режима связывания — по кнопке закрытия баннера или тапу по пустому месту холста. */
+    fun onCancelLinking() {
+        _uiState.value = _uiState.value.copy(linkingState = null)
+    }
+
+    /** Выбор вида связи в BottomSheet ещё не созданной связи. */
+    fun onPendingRelationshipTypeChanged(type: RelationshipType) {
+        val pending = _uiState.value.pendingRelationship ?: return
+        _uiState.value = _uiState.value.copy(pendingRelationship = pending.copy(type = type))
+    }
+
+    /** Кнопка "Создать связь" в BottomSheet — сохраняем связь, если такой ещё нет. */
+    fun onConfirmPendingRelationship() {
+        val pending = _uiState.value.pendingRelationship ?: return
+        val alreadyLinked = _uiState.value.relationships.any {
+            it.fromTableId == pending.fromTableId && it.toTableId == pending.toTableId
+        }
+        if (!alreadyLinked) {
+            val newRelationship = Relationship(
+                id = UUID.randomUUID().toString(),
+                fromTableId = pending.fromTableId,
+                toTableId = pending.toTableId,
+                type = pending.type
+            )
+            _uiState.value = _uiState.value.copy(relationships = _uiState.value.relationships + newRelationship)
+        }
+        _uiState.value = _uiState.value.copy(pendingRelationship = null)
+    }
+
+    /** Закрытие BottomSheet новой связи без подтверждения — просто отменяем создание. */
+    fun onDismissPendingRelationship() {
+        _uiState.value = _uiState.value.copy(pendingRelationship = null)
+    }
+
+    /** Тап по подписи существующей связи на холсте — открываем её на редактирование/удаление. */
+    fun onRelationshipBadgeClick(relationshipId: String) {
+        _uiState.value = _uiState.value.copy(editingRelationshipId = relationshipId)
+    }
+
+    /** Смена вида связи прямо в BottomSheet редактирования — применяется сразу. */
+    fun onEditingRelationshipTypeChanged(type: RelationshipType) {
+        val relationshipId = _uiState.value.editingRelationshipId ?: return
+        _uiState.value = _uiState.value.copy(
+            relationships = _uiState.value.relationships.map { relationship ->
+                if (relationship.id == relationshipId) relationship.copy(type = type) else relationship
+            }
+        )
+    }
+
+    /** Кнопка "Удалить связь" в BottomSheet редактирования. */
+    fun onDeleteRelationship(relationshipId: String) {
+        _uiState.value = _uiState.value.copy(
+            relationships = _uiState.value.relationships.filterNot { it.id == relationshipId },
+            editingRelationshipId = null
+        )
+    }
+
+    fun onRelationshipEditDismiss() {
+        _uiState.value = _uiState.value.copy(editingRelationshipId = null)
     }
 
     /** Плюсик под таблицей — сразу создаём пустой атрибут и открываем его на редактирование. */

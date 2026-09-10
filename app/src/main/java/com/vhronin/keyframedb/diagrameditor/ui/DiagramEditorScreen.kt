@@ -1,6 +1,12 @@
 package com.vhronin.keyframedb.diagrameditor.ui
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -45,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,6 +79,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
+import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColumn
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.theme.KeyframeDBExtendedTheme
@@ -140,7 +148,11 @@ fun DiagramEditorScreen(
                     selectedTableId = uiState.selectedTableId,
                     hasDraggedSinceSelection = uiState.hasDraggedSinceSelection,
                     attributeEditingTableId = uiState.attributeEditingTableId,
-                    isOverlayHidden = uiState.renamingTableId != null || uiState.editingColumn != null,
+                    linkingState = uiState.linkingState,
+                    isOverlayHidden = uiState.renamingTableId != null ||
+                            uiState.editingColumn != null ||
+                            uiState.pendingRelationship != null ||
+                            uiState.editingRelationshipId != null,
                     onTableDrag = viewModel::onTableDrag,
                     onTableDragEnd = viewModel::onTableDragEnd,
                     onTableSelected = viewModel::onTableSelected,
@@ -148,6 +160,9 @@ fun DiagramEditorScreen(
                     onRenameTableClick = viewModel::onRenameTableClick,
                     onEditAttributesClick = viewModel::onEditAttributesClick,
                     onBuildRelationshipClick = viewModel::onBuildRelationshipClick,
+                    onLinkTableTap = viewModel::onLinkTableTap,
+                    onCancelLinking = viewModel::onCancelLinking,
+                    onRelationshipBadgeClick = viewModel::onRelationshipBadgeClick,
                     onAddColumnClick = viewModel::onAddColumnClick,
                     onDeleteColumn = viewModel::onDeleteColumn,
                     onColumnClick = viewModel::onColumnClick,
@@ -188,6 +203,36 @@ fun DiagramEditorScreen(
             onTogglePrimaryKey = { viewModel.onTogglePrimaryKey(editingTable.id, editingColumnValue.id) },
             onToggleForeignKey = { viewModel.onToggleForeignKey(editingTable.id, editingColumnValue.id) },
             onDelete = { viewModel.onDeleteColumn(editingTable.id, editingColumnValue.id) }
+        )
+    }
+
+    val pending = uiState.pendingRelationship
+    val pendingFromTable = uiState.tables.find { it.id == pending?.fromTableId }
+    val pendingToTable = uiState.tables.find { it.id == pending?.toTableId }
+    if (pending != null && pendingFromTable != null && pendingToTable != null) {
+        RelationshipSheet(
+            fromTableName = pendingFromTable.name,
+            toTableName = pendingToTable.name,
+            type = pending.type,
+            isNew = true,
+            onTypeChange = viewModel::onPendingRelationshipTypeChanged,
+            onDismiss = viewModel::onDismissPendingRelationship,
+            onConfirmNew = viewModel::onConfirmPendingRelationship
+        )
+    }
+
+    val editingRelationship = uiState.relationships.find { it.id == uiState.editingRelationshipId }
+    val editingRelFromTable = uiState.tables.find { it.id == editingRelationship?.fromTableId }
+    val editingRelToTable = uiState.tables.find { it.id == editingRelationship?.toTableId }
+    if (editingRelationship != null && editingRelFromTable != null && editingRelToTable != null) {
+        RelationshipSheet(
+            fromTableName = editingRelFromTable.name,
+            toTableName = editingRelToTable.name,
+            type = editingRelationship.type,
+            isNew = false,
+            onTypeChange = viewModel::onEditingRelationshipTypeChanged,
+            onDismiss = viewModel::onRelationshipEditDismiss,
+            onDelete = { viewModel.onDeleteRelationship(editingRelationship.id) }
         )
     }
 }
@@ -253,6 +298,7 @@ private fun DiagramCanvas(
     selectedTableId: String?,
     hasDraggedSinceSelection: Boolean,
     attributeEditingTableId: String?,
+    linkingState: LinkingState?,
     isOverlayHidden: Boolean,
     onTableDrag: (tableId: String, dx: Float, dy: Float) -> Unit,
     onTableDragEnd: (tableId: String) -> Unit,
@@ -261,6 +307,9 @@ private fun DiagramCanvas(
     onRenameTableClick: (tableId: String) -> Unit,
     onEditAttributesClick: (tableId: String) -> Unit,
     onBuildRelationshipClick: (tableId: String) -> Unit,
+    onLinkTableTap: (tableId: String) -> Unit,
+    onCancelLinking: () -> Unit,
+    onRelationshipBadgeClick: (relationshipId: String) -> Unit,
     onAddColumnClick: (tableId: String) -> Unit,
     onDeleteColumn: (tableId: String, columnId: String) -> Unit,
     onColumnClick: (tableId: String, columnId: String) -> Unit,
@@ -274,8 +323,10 @@ private fun DiagramCanvas(
     var scale by remember { mutableStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var canvasSizePx by remember { mutableStateOf(IntSize.Zero) }
-    // Какая таблица прямо сейчас реально тащится пальцем — отдельно от "выбрана".
-    // Пока идёт перетаскивание, плавающее меню прячем (см. п.1 запроса).
+    // Какая таблица прямо сейчас реально тащится пальцем — нужна только для визуального
+    // фидбека карточки во время перетаскивания (scale/тень в TableCard, см. isDragging).
+    // Само появление плавающего меню зависит не от неё, а от hasDraggedSinceSelection —
+    // см. onDragStart ниже, где долгое нажатие выделяет таблицу и тем самым открывает окно показа меню.
     var draggingTableId by remember { mutableStateOf<String?>(null) }
 
     Box(
@@ -311,8 +362,17 @@ private fun DiagramCanvas(
                     transformOrigin = TransformOrigin(0f, 0f)
                 )
         ) {
-            ConnectorLines(tables = tables, relationships = relationships)
+            // Пока идёт связывание, подписи существующих связей временно не тапабельны —
+            // иначе было бы неясно, что имел в виду тап: выбрать таблицу или отредактировать связь.
+            val isLinking = linkingState != null
+            ConnectorLines(
+                tables = tables,
+                relationships = relationships,
+                onRelationshipClick = if (isLinking) null else onRelationshipBadgeClick
+            )
 
+            // Пока идёт связывание, тап по любой таблице выбирает первую/вторую точку связи,
+            // а перетаскивание временно выключаем — чтобы случайный сдвиг пальца не сбивал режим.
             tables.forEachIndexed { index, table ->
                 val accentColor = if (index % 2 == 0) {
                     MaterialTheme.colorScheme.primary
@@ -326,17 +386,24 @@ private fun DiagramCanvas(
                         isSelected = selectedTableId == table.id,
                         isDragging = draggingTableId == table.id,
                         isEditingAttributes = attributeEditingTableId == table.id,
-                        onTap = { onTableSelected(table.id) },
-                        onDrag = { dx, dy -> onTableDrag(table.id, dx, dy) },
+                        isLinkSource = linkingState?.fromTableId == table.id,
+                        onTap = {
+                            if (isLinking) onLinkTableTap(table.id) else onTableSelected(table.id)
+                        },
+                        onDrag = { dx, dy -> if (!isLinking) onTableDrag(table.id, dx, dy) },
                         onDragStart = {
-                            onTableSelected(table.id)
-                            draggingTableId = table.id
+                            if (!isLinking) {
+                                onTableSelected(table.id)
+                                draggingTableId = table.id
+                            }
                         },
                         onDragEnd = {
-                            onTableDragEnd(table.id)
-                            draggingTableId = null
+                            if (!isLinking) {
+                                onTableDragEnd(table.id)
+                                draggingTableId = null
+                            }
                         },
-                        onDragCancel = { draggingTableId = null },
+                        onDragCancel = { if (!isLinking) draggingTableId = null },
                         onDeleteColumn = { columnId -> onDeleteColumn(table.id, columnId) },
                         onColumnClick = { columnId -> onColumnClick(table.id, columnId) },
                         onAddColumnClick = { onAddColumnClick(table.id) }
@@ -347,23 +414,92 @@ private fun DiagramCanvas(
 
         // Меню действий рисуем поверх трансформированного слоя, не внутри него —
         // иначе кнопки становились бы крошечными при отдалении холста.
-        // Показываем его только в окне "таблицу выделили, но ещё не двигали":
-        // прячем, пока таблицу реально тащат, после того как её подвинули и отпустили,
-        // и пока открыт какой-то BottomSheet.
-        if (!isOverlayHidden) {
-            val selectedTable = tables.find { it.id == selectedTableId }
-            if (selectedTable != null && draggingTableId == null && !hasDraggedSinceSelection) {
+        // Появляется, как только таблицу зажали (долгое нажатие сработало) — ещё до отпускания —
+        // и остаётся видимым после чистого отпускания без сдвига, чтобы по нему можно было
+        // отдельно тапнуть. Прячем только когда таблицу реально подвинули, пока открыт BottomSheet,
+        // и на время режима связывания (тогда вместо меню показан баннер выбора таблицы).
+        val menuTable = if (!isOverlayHidden && linkingState == null) {
+            tables.find { it.id == selectedTableId }?.takeIf { !hasDraggedSinceSelection }
+        } else {
+            null
+        }
+        // AnimatedVisibility на время exit-анимации продолжает показывать последний контент,
+        // поэтому держим последнюю ненулевую таблицу отдельно — иначе на затухании было бы нечего рисовать.
+        var lastMenuTable by remember { mutableStateOf<TableEntity?>(null) }
+        if (menuTable != null) {
+            lastMenuTable = menuTable
+        }
+        AnimatedVisibility(
+            visible = menuTable != null,
+            enter = fadeIn(tween(140)) + scaleIn(initialScale = 0.85f, animationSpec = tween(140)),
+            exit = fadeOut(tween(110)) + scaleOut(targetScale = 0.85f, animationSpec = tween(110))
+        ) {
+            lastMenuTable?.let { table ->
                 TableActionMenu(
-                    table = selectedTable,
+                    table = table,
                     scale = scale,
                     panOffset = panOffset,
                     canvasSizePx = canvasSizePx,
                     density = density,
-                    onEditAttributesClick = { onEditAttributesClick(selectedTable.id) },
-                    onRenameClick = { onRenameTableClick(selectedTable.id) },
-                    onBuildRelationClick = { onBuildRelationshipClick(selectedTable.id) }
+                    onEditAttributesClick = { onEditAttributesClick(table.id) },
+                    onRenameClick = { onRenameTableClick(table.id) },
+                    onBuildRelationClick = { onBuildRelationshipClick(table.id) }
                 )
             }
+        }
+
+        // Баннер живёт на протяжении обоих шагов связывания (выбор первой и второй таблицы),
+        // поэтому "последнее известное" здесь — это весь LinkingState, а не одна таблица.
+        var lastLinkingState by remember { mutableStateOf<LinkingState?>(null) }
+        if (linkingState != null) {
+            lastLinkingState = linkingState
+        }
+        val linkingSourceTable = tables.find { it.id == lastLinkingState?.fromTableId }
+        AnimatedVisibility(
+            visible = linkingState != null,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
+            enter = fadeIn(tween(140)),
+            exit = fadeOut(tween(110))
+        ) {
+            LinkingModeBanner(sourceTableName = linkingSourceTable?.name, onCancel = onCancelLinking)
+        }
+    }
+}
+
+/** Баннер поверх холста на время выбора таблиц для связи (см. onBuildRelationshipClick/onAddRelationClick). */
+@Composable
+private fun LinkingModeBanner(sourceTableName: String?, onCancel: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(percent = 50))
+            .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Default.Link,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(16.dp)
+        )
+        Text(
+            text = if (sourceTableName == null) {
+                "Выберите первую таблицу для связи"
+            } else {
+                "Выберите таблицу для связи с «$sourceTableName»"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        IconButton(onClick = onCancel, modifier = Modifier.size(28.dp)) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Отменить создание связи",
+                tint = KeyframeDBExtendedTheme.colors.inkMuted,
+                modifier = Modifier.size(14.dp)
+            )
         }
     }
 }
@@ -470,7 +606,8 @@ private fun Float.safeMod(step: Float): Float = ((this % step) + step) % step
 @Composable
 private fun ConnectorLines(
     tables: List<TableEntity>,
-    relationships: List<Relationship>
+    relationships: List<Relationship>,
+    onRelationshipClick: ((relationshipId: String) -> Unit)?
 ) {
     val density = LocalDensity.current
     val lineColor = MaterialTheme.colorScheme.primary
@@ -509,28 +646,32 @@ private fun ConnectorLines(
         }
     }
 
+    // Подпись вида связи показываем всегда (а не только если задан текст) — теперь это не
+    // произвольная строка, а короткая метка перечисления RelationshipType. Тап по ней открывает
+    // BottomSheet смены вида/удаления связи (см. onRelationshipBadgeClick), кроме как во время
+    // самого связывания — тогда onRelationshipClick приходит null и подпись не реагирует на тап.
     relationships.forEach { relationship ->
         val from = tablesById[relationship.fromTableId] ?: return@forEach
         val to = tablesById[relationship.toTableId] ?: return@forEach
-        if (relationship.label.isNotBlank()) {
-            val midX = (from.x + to.x + TableCardWidth.value) / 2f
-            val midY = (from.y + to.y) / 2f + 12f
-            RelationLabel(
-                text = relationship.label,
-                modifier = Modifier.offset(x = midX.dp, y = midY.dp)
-            )
-        }
+        val midX = (from.x + to.x + TableCardWidth.value) / 2f
+        val midY = (from.y + to.y) / 2f + 12f
+        RelationLabel(
+            text = relationship.type.shortLabel,
+            onClick = onRelationshipClick?.let { onClick -> { onClick(relationship.id) } },
+            modifier = Modifier.offset(x = midX.dp, y = midY.dp)
+        )
     }
 }
 
 @Composable
-private fun RelationLabel(text: String, modifier: Modifier = Modifier) {
+private fun RelationLabel(text: String, onClick: (() -> Unit)?, modifier: Modifier = Modifier) {
     Text(
         text = text,
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.primary,
         modifier = modifier
             .clip(RoundedCornerShape(8.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .background(MaterialTheme.colorScheme.background)
             .border(1.dp, KeyframeDBExtendedTheme.colors.accentSoft, RoundedCornerShape(8.dp))
             .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -544,6 +685,7 @@ private fun TableCard(
     isSelected: Boolean,
     isDragging: Boolean,
     isEditingAttributes: Boolean,
+    isLinkSource: Boolean,
     onTap: () -> Unit,
     onDrag: (dx: Float, dy: Float) -> Unit,
     onDragStart: () -> Unit,
@@ -561,36 +703,58 @@ private fun TableCard(
     // не просто по факту выделения таблицы, и не во время перетаскивания.
     val showEditAffordances = isEditingAttributes && !isDragging
 
+    // pointerInput ниже с ключом table.id живёт, пока карточка на экране, и не перезапускается
+    // при каждой рекомпозиции — поэтому обычные лямбда-параметры внутри него могут "протухнуть"
+    // и не увидеть новое поведение (например, переключение в режим связывания на лету).
+    // rememberUpdatedState гарантирует, что жест всегда вызывает самую свежую версию колбэка.
+    val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnDrag by rememberUpdatedState(onDrag)
+    val currentOnDragStart by rememberUpdatedState(onDragStart)
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
+    val currentOnDragCancel by rememberUpdatedState(onDragCancel)
+
     Column(modifier = modifier.offset(x = table.x.dp, y = table.y.dp)) {
         Column(
             modifier = Modifier
                 .width(TableCardWidth)
                 .scale(cardScale)
                 .shadow(
-                    elevation = if (isDragging) 10.dp else 0.dp,
+                    elevation = when {
+                        isDragging -> 10.dp
+                        // Лёгкая тень, пока включён режим редактирования атрибутов или таблица —
+                        // источник связи: сигнал пользователю, что с ней сейчас можно работать иначе.
+                        isEditingAttributes || isLinkSource -> 4.dp
+                        else -> 0.dp
+                    },
                     shape = RoundedCornerShape(13.dp)
                 )
                 .clip(RoundedCornerShape(13.dp))
                 .background(MaterialTheme.colorScheme.surface)
                 .border(
-                    width = if (isDragging) 1.5.dp else 1.dp,
-                    color = if (isDragging) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                    width = if (isDragging || isEditingAttributes || isLinkSource) 1.5.dp else 1.dp,
+                    color = when {
+                        isDragging || isEditingAttributes -> MaterialTheme.colorScheme.primary
+                        // Отдельный акцентный цвет для источника связи — чтобы не путать с обычным
+                        // выделением/редактированием, пока пользователь выбирает вторую таблицу.
+                        isLinkSource -> KeyframeDBExtendedTheme.colors.accent2
+                        else -> MaterialTheme.colorScheme.outline
+                    },
                     shape = RoundedCornerShape(13.dp)
                 )
                 .pointerInput(table.id) {
                     // Отдельный детектор простого тапа — выделяет таблицу без запуска drag,
                     // чтобы плавающее меню могло появиться сразу по короткому нажатию.
-                    detectTapGestures(onTap = { onTap() })
+                    detectTapGestures(onTap = { currentOnTap() })
                 }
                 .pointerInput(table.id) {
                     detectDragGesturesAfterLongPress(
-                        onDragStart = { onDragStart() },
-                        onDragEnd = { onDragEnd() },
-                        onDragCancel = { onDragCancel() }
+                        onDragStart = { currentOnDragStart() },
+                        onDragEnd = { currentOnDragEnd() },
+                        onDragCancel = { currentOnDragCancel() }
                     ) { change, dragAmount ->
                         change.consume()
                         with(density) {
-                            onDrag(dragAmount.x.toDp().value, dragAmount.y.toDp().value)
+                            currentOnDrag(dragAmount.x.toDp().value, dragAmount.y.toDp().value)
                         }
                     }
                 }
@@ -951,6 +1115,87 @@ private fun EditColumnSheet(
                 Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Удалить атрибут")
+            }
+        }
+    }
+}
+
+/**
+ * Один BottomSheet на оба случая: создание новой связи (isNew = true, снизу кнопка "Создать
+ * связь", закрытие без подтверждения просто отменяет её) и редактирование уже существующей
+ * (isNew = false, вид связи меняется сразу по тапу на чип, снизу — кнопка удаления).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RelationshipSheet(
+    fromTableName: String,
+    toTableName: String,
+    type: RelationshipType,
+    isNew: Boolean,
+    onTypeChange: (RelationshipType) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirmNew: () -> Unit = {},
+    onDelete: () -> Unit = {}
+) {
+    val sheetState = rememberModalBottomSheetState()
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.background,
+        dragHandle = { SheetDragHandle() }
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            SheetHeader(
+                icon = Icons.Default.Link,
+                title = if (isNew) "Новая связь" else "Связь",
+                subtitle = "$fromTableName → $toTableName"
+            )
+
+            Spacer(Modifier.height(18.dp))
+
+            Text(
+                text = "Вид связи",
+                style = MaterialTheme.typography.bodySmall,
+                color = KeyframeDBExtendedTheme.colors.inkMuted
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                RelationshipType.values().forEach { option ->
+                    FilterChip(
+                        selected = type == option,
+                        onClick = { onTypeChange(option) },
+                        label = { Text(option.shortLabel) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primary,
+                            selectedLabelColor = Color.White
+                        )
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            if (isNew) {
+                Button(onClick = onConfirmNew, modifier = Modifier.fillMaxWidth()) {
+                    Text("Создать связь")
+                }
+            } else {
+                OutlinedButton(
+                    onClick = onDelete,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Удалить связь")
+                }
             }
         }
     }

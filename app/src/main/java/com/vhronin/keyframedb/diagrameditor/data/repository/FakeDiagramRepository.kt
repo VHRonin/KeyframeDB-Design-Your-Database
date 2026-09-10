@@ -2,6 +2,7 @@ package com.vhronin.keyframedb.diagrameditor.data.repository
 
 import com.vhronin.keyframedb.diagrameditor.domain.model.Diagram
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
+import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColumn
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.diagrameditor.domain.repository.DiagramRepository
@@ -45,7 +46,7 @@ class FakeDiagramRepository : DiagramRepository {
                 )
             ),
             relationships = listOf(
-                Relationship(id = "r1", fromTableId = "users", toTableId = "orders", label = "1 – N")
+                Relationship(id = "r1", fromTableId = "users", toTableId = "orders", type = RelationshipType.ONE_TO_MANY)
             )
         )
     )
