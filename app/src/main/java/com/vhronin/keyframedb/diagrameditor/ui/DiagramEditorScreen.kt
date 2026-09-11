@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -95,6 +96,25 @@ private const val TableHeaderDots = 2
 private const val TableRowDots = 2
 private const val MinCanvasScale = 0.4f
 private const val MaxCanvasScale = 3f
+// Насколько меняется scale за одно нажатие кнопки зума на тулбаре (20% за шаг).
+private const val ZoomStepFactor = 1.2f
+
+/**
+ * Считает новые scale/panOffset для одного шага зума кнопкой на тулбаре — от центра видимой
+ * области холста, той же математикой компенсации сдвига, что и в жесте пальцами (см. DiagramCanvas).
+ */
+private fun zoomStep(
+    currentScale: Float,
+    currentPan: Offset,
+    canvasSizePx: IntSize,
+    factor: Float
+): Pair<Float, Offset> {
+    val newScale = (currentScale * factor).coerceIn(MinCanvasScale, MaxCanvasScale)
+    val appliedZoom = newScale / currentScale
+    val centroid = Offset(canvasSizePx.width / 2f, canvasSizePx.height / 2f)
+    val newPan = (currentPan - centroid) * appliedZoom + centroid
+    return newScale to newPan
+}
 private val MenuWidth = 168.dp
 // В меню три пункта: Редактировать / Переименовать сущность / Связь.
 private val MenuHeightExpanded = 144.dp
@@ -112,6 +132,12 @@ fun DiagramEditorScreen(
     viewModel: DiagramEditorViewModel = koinViewModel(parameters = { parametersOf(projectId) })
 ) {
     val uiState by viewModel.uiState.collectAsState()
+
+    // Камера холста живёт здесь, а не внутри DiagramCanvas — тулбар с кнопками зума лежит
+    // рядом с холстом (сосед по Box), а не внутри него, и тоже должен уметь ей управлять.
+    var canvasScale by remember { mutableStateOf(1f) }
+    var canvasPanOffset by remember { mutableStateOf(Offset.Zero) }
+    var canvasSizePx by remember { mutableStateOf(IntSize.Zero) }
 
     LaunchedEffect(Unit) {
         viewModel.navigationEvents.collect { event ->
@@ -166,12 +192,27 @@ fun DiagramEditorScreen(
                     onAddColumnClick = viewModel::onAddColumnClick,
                     onDeleteColumn = viewModel::onDeleteColumn,
                     onColumnClick = viewModel::onColumnClick,
+                    scale = canvasScale,
+                    onScaleChange = { canvasScale = it },
+                    panOffset = canvasPanOffset,
+                    onPanOffsetChange = { canvasPanOffset = it },
+                    canvasSizePx = canvasSizePx,
+                    onCanvasSizeChange = { canvasSizePx = it },
                     modifier = Modifier.fillMaxSize()
                 )
 
                 EditorToolbar(
                     onAddRelationClick = viewModel::onAddRelationClick,
-                    onZoomClick = { /* TODO: следующий шаг */ },
+                    onZoomInClick = {
+                        val (newScale, newPan) = zoomStep(canvasScale, canvasPanOffset, canvasSizePx, ZoomStepFactor)
+                        canvasScale = newScale
+                        canvasPanOffset = newPan
+                    },
+                    onZoomOutClick = {
+                        val (newScale, newPan) = zoomStep(canvasScale, canvasPanOffset, canvasSizePx, 1f / ZoomStepFactor)
+                        canvasScale = newScale
+                        canvasPanOffset = newPan
+                    },
                     onAddTableClick = viewModel::onAddTableClick,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -313,20 +354,30 @@ private fun DiagramCanvas(
     onAddColumnClick: (tableId: String) -> Unit,
     onDeleteColumn: (tableId: String, columnId: String) -> Unit,
     onColumnClick: (tableId: String, columnId: String) -> Unit,
+    // Камера холста вынесена наружу (а не просто remember здесь), чтобы кнопки зума в EditorToolbar,
+    // который лежит рядом с DiagramCanvas, а не внутри него, тоже могли ей управлять.
+    scale: Float,
+    onScaleChange: (Float) -> Unit,
+    panOffset: Offset,
+    onPanOffsetChange: (Offset) -> Unit,
+    canvasSizePx: IntSize,
+    onCanvasSizeChange: (IntSize) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val dotColor = MaterialTheme.colorScheme.outline
     val density = LocalDensity.current
 
-    // Камера холста: во сколько раз увеличено (scale) и насколько сдвинуто (panOffset, в px).
-    // Чисто визуальное UI-состояние экрана — в ViewModel его не выносим, там нечего хранить.
-    var scale by remember { mutableStateOf(1f) }
-    var panOffset by remember { mutableStateOf(Offset.Zero) }
-    var canvasSizePx by remember { mutableStateOf(IntSize.Zero) }
+    // pointerInput(Unit) ниже живёт на весь жизненный цикл холста и не перезапускается —
+    // поэтому, как и в TableCard, читаем/пишем камеру через rememberUpdatedState, а не напрямую
+    // через параметры: иначе жест масштабирования видел бы значения только первой композиции.
+    val currentScale by rememberUpdatedState(scale)
+    val currentPanOffset by rememberUpdatedState(panOffset)
+    val currentOnScaleChange by rememberUpdatedState(onScaleChange)
+    val currentOnPanOffsetChange by rememberUpdatedState(onPanOffsetChange)
     // Какая таблица прямо сейчас реально тащится пальцем — нужна только для визуального
     // фидбека карточки во время перетаскивания (scale/тень в TableCard, см. isDragging).
-    // Само появление плавающего меню зависит не от неё, а от hasDraggedSinceSelection —
-    // см. onDragStart ниже, где долгое нажатие выделяет таблицу и тем самым открывает окно показа меню.
+    // Долгое нажатие саму таблицу больше не выделяет и меню не открывает — см. onDragStart ниже,
+    // оно только двигает таблицу. Открывается меню исключительно тапом (onTableSelected).
     var draggingTableId by remember { mutableStateOf<String?>(null) }
 
     Box(
@@ -334,18 +385,18 @@ private fun DiagramCanvas(
             .clip(RoundedCornerShape(20.dp))
             .background(MaterialTheme.colorScheme.background)
             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(20.dp))
-            .onSizeChanged { canvasSizePx = it }
+            .onSizeChanged { onCanvasSizeChange(it) }
             .drawBehind { drawDotGrid(dotColor, scale, panOffset) }
             .pointerInput(Unit) {
                 detectTapGestures(onTap = { onCanvasTap() })
             }
             .pointerInput(Unit) {
                 detectTransformGestures { centroid, pan, zoom, _ ->
-                    val newScale = (scale * zoom).coerceIn(MinCanvasScale, MaxCanvasScale)
+                    val newScale = (currentScale * zoom).coerceIn(MinCanvasScale, MaxCanvasScale)
                     // Компенсируем сдвиг так, чтобы зум "рос" из точки под пальцами, а не из угла холста.
-                    val appliedZoom = newScale / scale
-                    panOffset = (panOffset - centroid) * appliedZoom + centroid + pan
-                    scale = newScale
+                    val appliedZoom = newScale / currentScale
+                    currentOnPanOffsetChange((currentPanOffset - centroid) * appliedZoom + centroid + pan)
+                    currentOnScaleChange(newScale)
                 }
             }
     ) {
@@ -393,7 +444,6 @@ private fun DiagramCanvas(
                         onDrag = { dx, dy -> if (!isLinking) onTableDrag(table.id, dx, dy) },
                         onDragStart = {
                             if (!isLinking) {
-                                onTableSelected(table.id)
                                 draggingTableId = table.id
                             }
                         },
@@ -414,10 +464,9 @@ private fun DiagramCanvas(
 
         // Меню действий рисуем поверх трансформированного слоя, не внутри него —
         // иначе кнопки становились бы крошечными при отдалении холста.
-        // Появляется, как только таблицу зажали (долгое нажатие сработало) — ещё до отпускания —
-        // и остаётся видимым после чистого отпускания без сдвига, чтобы по нему можно было
-        // отдельно тапнуть. Прячем только когда таблицу реально подвинули, пока открыт BottomSheet,
-        // и на время режима связывания (тогда вместо меню показан баннер выбора таблицы).
+        // Открывается только тапом по таблице (onTableSelected) и остаётся видимым, пока таблицу
+        // не подвинули, не тапнули по другому месту, не открыли BottomSheet или режим связывания
+        // (тогда вместо меню показан баннер выбора таблицы) — см. onDragStart, там меню не открывается.
         val menuTable = if (!isOverlayHidden && linkingState == null) {
             tables.find { it.id == selectedTableId }?.takeIf { !hasDraggedSinceSelection }
         } else {
@@ -889,7 +938,8 @@ private fun FieldBadge(text: String, color: Color, background: Color) {
 @Composable
 private fun EditorToolbar(
     onAddRelationClick: () -> Unit,
-    onZoomClick: () -> Unit,
+    onZoomInClick: () -> Unit,
+    onZoomOutClick: () -> Unit,
     onAddTableClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -909,8 +959,13 @@ private fun EditorToolbar(
         )
         ToolbarIconButton(
             icon = Icons.Default.ZoomIn,
-            contentDescription = "Масштаб",
-            onClick = onZoomClick
+            contentDescription = "Увеличить",
+            onClick = onZoomInClick
+        )
+        ToolbarIconButton(
+            icon = Icons.Default.ZoomOut,
+            contentDescription = "Уменьшить",
+            onClick = onZoomOutClick
         )
 
         VerticalDivider(

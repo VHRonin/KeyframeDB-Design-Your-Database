@@ -166,15 +166,22 @@ class DiagramEditorViewModel(
         )
     }
 
+    /** Кнопка "Переименовать" в плавающем меню — открывает шторку и прячет само меню. */
     fun onRenameTableClick(tableId: String) {
-        _uiState.value = _uiState.value.copy(renamingTableId = tableId)
+        _uiState.value = _uiState.value.copy(
+            renamingTableId = tableId,
+            selectedTableId = null,
+            hasDraggedSinceSelection = false
+        )
     }
 
-    /** Кнопка "Редактировать" в плавающем меню — включает/выключает кнопки удаления и добавления атрибутов. */
+    /** Кнопка "Редактировать" в плавающем меню — включает/выключает кнопки удаления и добавления атрибутов, само меню прячет. */
     fun onEditAttributesClick(tableId: String) {
         val isAlreadyEditing = _uiState.value.attributeEditingTableId == tableId
         _uiState.value = _uiState.value.copy(
-            attributeEditingTableId = if (isAlreadyEditing) null else tableId
+            attributeEditingTableId = if (isAlreadyEditing) null else tableId,
+            selectedTableId = null,
+            hasDraggedSinceSelection = false
         )
     }
 
