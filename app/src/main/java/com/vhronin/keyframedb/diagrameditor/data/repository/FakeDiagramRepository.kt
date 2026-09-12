@@ -3,6 +3,7 @@ package com.vhronin.keyframedb.diagrameditor.data.repository
 import com.vhronin.keyframedb.diagrameditor.domain.model.Diagram
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
 import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
+import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColumn
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.diagrameditor.domain.repository.DiagramRepository
@@ -27,6 +28,7 @@ class FakeDiagramRepository : DiagramRepository {
                     name = "users",
                     x = 16f,
                     y = 16f,
+                    color = TableColor.INDIGO,
                     columns = listOf(
                         TableColumn(id = "1", name = "id", type = "uuid", isPrimaryKey = true),
                         TableColumn(id = "2", name = "email", type = "varchar"),
@@ -38,6 +40,7 @@ class FakeDiagramRepository : DiagramRepository {
                     name = "orders",
                     x = 96f,
                     y = 176f,
+                    color = TableColor.EMERALD,
                     columns = listOf(
                         TableColumn(id = "1", name = "id", type = "uuid", isPrimaryKey = true),
                         TableColumn(id = "2", name = "user_id", type = "uuid", isForeignKey = true),

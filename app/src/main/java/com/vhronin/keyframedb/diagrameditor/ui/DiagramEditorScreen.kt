@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -81,6 +82,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
 import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
+import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColumn
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.theme.KeyframeDBExtendedTheme
@@ -115,6 +117,25 @@ private fun zoomStep(
     val newPan = (currentPan - centroid) * appliedZoom + centroid
     return newScale to newPan
 }
+
+// Акцентные цвета таблиц, которых нет в основной палитре темы (Indigo/Emerald там уже есть
+// как primary/accent2 — берём их оттуда, чтобы не дублировать). Небольшой курируемый набор,
+// без произвольного RGB — см. TableColor в domain-слое.
+private val TableColorAmber = Color(0xFFF5A524)
+private val TableColorRose = Color(0xFFF43F7E)
+private val TableColorViolet = Color(0xFF8B5CF6)
+private val TableColorSky = Color(0xFF0EA5E9)
+
+@Composable
+private fun TableColor.toComposeColor(): Color = when (this) {
+    TableColor.INDIGO -> MaterialTheme.colorScheme.primary
+    TableColor.EMERALD -> KeyframeDBExtendedTheme.colors.accent2
+    TableColor.AMBER -> TableColorAmber
+    TableColor.ROSE -> TableColorRose
+    TableColor.VIOLET -> TableColorViolet
+    TableColor.SKY -> TableColorSky
+}
+
 private val MenuWidth = 168.dp
 // В меню три пункта: Редактировать / Переименовать сущность / Связь.
 private val MenuHeightExpanded = 144.dp
@@ -156,9 +177,11 @@ fun DiagramEditorScreen(
             EditorTopBar(
                 projectName = uiState.projectName,
                 isSaved = uiState.isSaved,
+                canUndo = uiState.canUndo,
                 onBackClick = viewModel::onBackClick,
                 onUndoClick = viewModel::onUndoClick,
-                onExportClick = viewModel::onExportClick
+                onExportClick = viewModel::onExportClick,
+                onRenameProjectClick = viewModel::onRenameProjectClick
             )
 
             Box(
@@ -178,7 +201,8 @@ fun DiagramEditorScreen(
                     isOverlayHidden = uiState.renamingTableId != null ||
                             uiState.editingColumn != null ||
                             uiState.pendingRelationship != null ||
-                            uiState.editingRelationshipId != null,
+                            uiState.editingRelationshipId != null ||
+                            uiState.isRenamingProject,
                     onTableDrag = viewModel::onTableDrag,
                     onTableDragEnd = viewModel::onTableDragEnd,
                     onTableSelected = viewModel::onTableSelected,
@@ -227,7 +251,16 @@ fun DiagramEditorScreen(
         RenameTableSheet(
             table = renamingTable,
             onDismiss = viewModel::onRenameDismiss,
-            onConfirm = { newName -> viewModel.onTableRenamed(renamingTable.id, newName) }
+            onConfirm = { newName -> viewModel.onTableRenamed(renamingTable.id, newName) },
+            onColorChange = { color -> viewModel.onTableColorChanged(renamingTable.id, color) }
+        )
+    }
+
+    if (uiState.isRenamingProject) {
+        RenameProjectSheet(
+            currentName = uiState.projectName,
+            onDismiss = viewModel::onProjectRenameDismiss,
+            onConfirm = viewModel::onProjectRenamed
         )
     }
 
@@ -282,9 +315,11 @@ fun DiagramEditorScreen(
 private fun EditorTopBar(
     projectName: String,
     isSaved: Boolean,
+    canUndo: Boolean,
     onBackClick: () -> Unit,
     onUndoClick: () -> Unit,
-    onExportClick: () -> Unit
+    onExportClick: () -> Unit,
+    onRenameProjectClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -300,14 +335,27 @@ private fun EditorTopBar(
             )
         }
 
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = projectName,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onBackground,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .clickable(onClick = onRenameProjectClick)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = projectName,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Icon(
+                    imageVector = Icons.Default.Edit,
+                    contentDescription = "Переименовать схему",
+                    tint = KeyframeDBExtendedTheme.colors.inkMuted,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
             Text(
                 text = if (isSaved) "Сохранено" else "Есть несохранённые изменения",
                 style = MaterialTheme.typography.bodySmall,
@@ -315,11 +363,11 @@ private fun EditorTopBar(
             )
         }
 
-        IconButton(onClick = onUndoClick) {
+        IconButton(onClick = onUndoClick, enabled = canUndo) {
             Icon(
                 imageVector = Icons.Default.Undo,
                 contentDescription = "Отменить",
-                tint = MaterialTheme.colorScheme.onBackground
+                tint = if (canUndo) MaterialTheme.colorScheme.onBackground else KeyframeDBExtendedTheme.colors.inkMuted
             )
         }
         IconButton(onClick = onExportClick) {
@@ -424,16 +472,11 @@ private fun DiagramCanvas(
 
             // Пока идёт связывание, тап по любой таблице выбирает первую/вторую точку связи,
             // а перетаскивание временно выключаем — чтобы случайный сдвиг пальца не сбивал режим.
-            tables.forEachIndexed { index, table ->
-                val accentColor = if (index % 2 == 0) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    KeyframeDBExtendedTheme.colors.accent2
-                }
+            tables.forEach { table ->
                 key(table.id) {
                     TableCard(
                         table = table,
-                        accentColor = accentColor,
+                        accentColor = table.color.toComposeColor(),
                         isSelected = selectedTableId == table.id,
                         isDragging = draggingTableId == table.id,
                         isEditingAttributes = attributeEditingTableId == table.id,
@@ -1044,7 +1087,8 @@ private fun SheetHeader(icon: ImageVector, title: String, subtitle: String) {
 private fun RenameTableSheet(
     table: TableEntity,
     onDismiss: () -> Unit,
-    onConfirm: (newName: String) -> Unit
+    onConfirm: (newName: String) -> Unit,
+    onColorChange: (TableColor) -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState()
     var draftName by remember(table.id) { mutableStateOf(table.name) }
@@ -1068,6 +1112,100 @@ private fun RenameTableSheet(
                 value = draftName,
                 onValueChange = { draftName = it },
                 label = { Text("Имя таблицы") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(Modifier.height(18.dp))
+
+            Text(
+                text = "Цвет таблицы",
+                style = MaterialTheme.typography.bodySmall,
+                color = KeyframeDBExtendedTheme.colors.inkMuted
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TableColor.values().forEach { option ->
+                    ColorSwatch(
+                        color = option.toComposeColor(),
+                        isSelected = table.color == option,
+                        onClick = { onColorChange(option) }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Button(
+                onClick = { onConfirm(draftName) },
+                enabled = draftName.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Готово")
+            }
+        }
+    }
+}
+
+/** Кружок-образец акцентного цвета таблицы; выбранный отмечен галочкой поверх заливки. */
+@Composable
+private fun ColorSwatch(color: Color, isSelected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(color)
+            .border(
+                width = if (isSelected) 2.dp else 1.dp,
+                color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                shape = CircleShape
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        if (isSelected) {
+            Icon(
+                imageVector = Icons.Default.Check,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+    }
+}
+
+/** Простая шторка переименования — только имя, без цвета (в отличие от таблицы, у схемы его нет). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RenameProjectSheet(
+    currentName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (newName: String) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState()
+    var draftName by remember(currentName) { mutableStateOf(currentName) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.background,
+        dragHandle = { SheetDragHandle() }
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            SheetHeader(icon = Icons.Default.Edit, title = "Название схемы", subtitle = "Текущее имя: $currentName")
+
+            Spacer(Modifier.height(18.dp))
+
+            OutlinedTextField(
+                value = draftName,
+                onValueChange = { draftName = it },
+                label = { Text("Название схемы") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )

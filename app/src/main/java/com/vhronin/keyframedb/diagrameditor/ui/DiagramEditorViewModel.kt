@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
 import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
+import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColumn
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.GetDiagramUseCase
@@ -55,7 +56,11 @@ data class DiagramEditorUiState(
     // Существующая связь, которую сейчас редактируют/удаляют (тап по подписи на холсте).
     val editingRelationshipId: String? = null,
     val renamingTableId: String? = null,
-    val editingColumn: EditingColumnRef? = null
+    val editingColumn: EditingColumnRef? = null,
+    // Шторка переименования самой схемы (тап по названию в топ-баре) — своё имя без ref на таблицу.
+    val isRenamingProject: Boolean = false,
+    // Есть ли что отменять — только чтобы притушить кнопку "Отменить" в топ-баре, когда стек пуст.
+    val canUndo: Boolean = false
 )
 
 /** Одноразовые события навигации — по той же схеме, что и в ProjectListViewModel. */
@@ -70,6 +75,26 @@ class DiagramEditorViewModel(
 
     private val _uiState = MutableStateFlow(DiagramEditorUiState(isLoading = true))
     val uiState: StateFlow<DiagramEditorUiState> = _uiState.asStateFlow()
+
+    // Стек отмены: снимки (tables, relationships) ДО каждого мутирующего действия.
+    // Обычный список, а не что-то более хитрое — таблиц и связей мало, лишний снимок
+    // стоит копейки, а код при этом простой (в духе всего остального в этом экране).
+    private val undoStack = mutableListOf<Pair<List<TableEntity>, List<Relationship>>>()
+
+    // Ключ последнего "непрерывного" действия — перетаскивание, печать в поле, перебор
+    // цветов/видов связи. Пока новый вызов приходит с ТЕМ ЖЕ ключом, новый снимок не
+    // делаем: считаем это продолжением того же шага отмены (иначе одна отмена откатывала
+    // бы один пиксель сдвига или одну напечатанную букву). null — действие атомарное,
+    // снимок обязателен всегда (см. pushUndoSnapshot).
+    private var lastCoalesceKey: String? = null
+
+    private fun pushUndoSnapshot(coalesceKey: String? = null) {
+        if (coalesceKey != null && coalesceKey == lastCoalesceKey) return
+        undoStack.add(_uiState.value.tables to _uiState.value.relationships)
+        if (undoStack.size > MAX_UNDO_STEPS) undoStack.removeAt(0)
+        lastCoalesceKey = coalesceKey
+        _uiState.value = _uiState.value.copy(canUndo = true)
+    }
 
     private val _navigationEvents = Channel<DiagramEditorNavigationEvent>(Channel.BUFFERED)
     val navigationEvents: Flow<DiagramEditorNavigationEvent> = _navigationEvents.receiveAsFlow()
@@ -89,14 +114,17 @@ class DiagramEditorViewModel(
 
     /** Двигаем блок таблицы по холсту — чистая UI-логика, пока ничего не сохраняем. */
     fun onTableDrag(tableId: String, dx: Float, dy: Float) {
-        updateTable(tableId) { it.copy(x = it.x + dx, y = it.y + dy) }
+        updateTable(tableId, coalesceKey = "drag:$tableId") { it.copy(x = it.x + dx, y = it.y + dy) }
         // Реальное перемещение уже произошло — вот теперь меню действительно нужно прятать.
         _uiState.value = _uiState.value.copy(hasDraggedSinceSelection = true)
     }
 
     /** Отпустили таблицу — примагничиваем её к ближайшей точке сетки. */
     fun onTableDragEnd(tableId: String) {
-        updateTable(tableId) { it.copy(x = snapToGrid(it.x), y = snapToGrid(it.y)) }
+        // Тот же ключ, что и в onTableDrag — снап к сетке считается частью того же
+        // перетаскивания, а не отдельным шагом отмены. Дальше окно закрываем.
+        updateTable(tableId, coalesceKey = "drag:$tableId") { it.copy(x = snapToGrid(it.x), y = snapToGrid(it.y)) }
+        lastCoalesceKey = null
     }
 
     private fun snapToGrid(value: Float): Float =
@@ -108,15 +136,51 @@ class DiagramEditorViewModel(
         }
     }
 
+    /** Кнопка "Отменить" в топ-баре — откатывает последний шаг стека изменений. */
     fun onUndoClick() {
-        // Пока без реализации — появится вместе со стеком изменений
+        val previous = undoStack.removeLastOrNull() ?: return
+        lastCoalesceKey = null
+        // Что бы сейчас ни было открыто (меню, шторка, режим связывания) — закрываем: после
+        // отката оно может указывать на объект, которого уже нет, или на устаревшее значение.
+        _uiState.value = _uiState.value.copy(
+            tables = previous.first,
+            relationships = previous.second,
+            canUndo = undoStack.isNotEmpty(),
+            selectedTableId = null,
+            hasDraggedSinceSelection = false,
+            attributeEditingTableId = null,
+            linkingState = null,
+            pendingRelationship = null,
+            editingRelationshipId = null,
+            renamingTableId = null,
+            editingColumn = null
+        )
     }
 
     fun onExportClick() {
         // Пока без реализации — появится вместе с PDF-экспортом
     }
 
+    /** Тап по названию схемы в топ-баре — открывает шторку переименования. */
+    fun onRenameProjectClick() {
+        _uiState.value = _uiState.value.copy(isRenamingProject = true)
+    }
+
+    fun onProjectRenameDismiss() {
+        _uiState.value = _uiState.value.copy(isRenamingProject = false)
+    }
+
+    /**
+     * Переименование самой схемы — в отличие от таблиц/атрибутов, никак не связано
+     * с tables/relationships, поэтому в общий стек отмены не попадает (там и так пусто
+     * при первом действии, а откатывать имя схемы отдельной кнопкой "Отменить" не нужно).
+     */
+    fun onProjectRenamed(newName: String) {
+        _uiState.value = _uiState.value.copy(projectName = newName, isRenamingProject = false)
+    }
+
     fun onAddTableClick() {
+        pushUndoSnapshot()
         val index = _uiState.value.tables.size
         val newTable = TableEntity(
             id = UUID.randomUUID().toString(),
@@ -187,11 +251,20 @@ class DiagramEditorViewModel(
 
     fun onRenameDismiss() {
         _uiState.value = _uiState.value.copy(renamingTableId = null)
+        lastCoalesceKey = null
     }
 
     fun onTableRenamed(tableId: String, newName: String) {
         updateTable(tableId) { it.copy(name = newName) }
         onRenameDismiss()
+    }
+
+    /**
+     * Выбор цвета таблицы в той же шторке переименования — применяется сразу по тапу на кружок.
+     * Схлопываем по id таблицы: перебор нескольких цветов подряд, пока решаешь, — один шаг отмены.
+     */
+    fun onTableColorChanged(tableId: String, color: TableColor) {
+        updateTable(tableId, coalesceKey = "table-color:$tableId") { it.copy(color = color) }
     }
 
     /** Кнопка "Связь" в плавающем меню — входим в режим связывания с уже известной первой таблицей. */
@@ -244,6 +317,7 @@ class DiagramEditorViewModel(
             it.fromTableId == pending.fromTableId && it.toTableId == pending.toTableId
         }
         if (!alreadyLinked) {
+            pushUndoSnapshot()
             val newRelationship = Relationship(
                 id = UUID.randomUUID().toString(),
                 fromTableId = pending.fromTableId,
@@ -268,6 +342,7 @@ class DiagramEditorViewModel(
     /** Смена вида связи прямо в BottomSheet редактирования — применяется сразу. */
     fun onEditingRelationshipTypeChanged(type: RelationshipType) {
         val relationshipId = _uiState.value.editingRelationshipId ?: return
+        pushUndoSnapshot(coalesceKey = "relationship-type:$relationshipId")
         _uiState.value = _uiState.value.copy(
             relationships = _uiState.value.relationships.map { relationship ->
                 if (relationship.id == relationshipId) relationship.copy(type = type) else relationship
@@ -277,6 +352,7 @@ class DiagramEditorViewModel(
 
     /** Кнопка "Удалить связь" в BottomSheet редактирования. */
     fun onDeleteRelationship(relationshipId: String) {
+        pushUndoSnapshot()
         _uiState.value = _uiState.value.copy(
             relationships = _uiState.value.relationships.filterNot { it.id == relationshipId },
             editingRelationshipId = null
@@ -285,10 +361,12 @@ class DiagramEditorViewModel(
 
     fun onRelationshipEditDismiss() {
         _uiState.value = _uiState.value.copy(editingRelationshipId = null)
+        lastCoalesceKey = null
     }
 
     /** Плюсик под таблицей — сразу создаём пустой атрибут и открываем его на редактирование. */
     fun onAddColumnClick(tableId: String) {
+        pushUndoSnapshot()
         val newColumn = TableColumn(id = UUID.randomUUID().toString(), name = "", type = "")
         _uiState.value = _uiState.value.copy(
             tables = _uiState.value.tables.map { table ->
@@ -304,6 +382,7 @@ class DiagramEditorViewModel(
 
     fun onColumnEditDismiss() {
         _uiState.value = _uiState.value.copy(editingColumn = null)
+        lastCoalesceKey = null
     }
 
     fun onDeleteColumn(tableId: String, columnId: String) {
@@ -311,11 +390,11 @@ class DiagramEditorViewModel(
     }
 
     fun onColumnNameChanged(tableId: String, columnId: String, newName: String) {
-        updateColumn(tableId, columnId) { it.copy(name = newName) }
+        updateColumn(tableId, columnId, coalesceKey = "column-name:$tableId:$columnId") { it.copy(name = newName) }
     }
 
     fun onColumnTypeChanged(tableId: String, columnId: String, newType: String) {
-        updateColumn(tableId, columnId) { it.copy(type = newType) }
+        updateColumn(tableId, columnId, coalesceKey = "column-type:$tableId:$columnId") { it.copy(type = newType) }
     }
 
     fun onTogglePrimaryKey(tableId: String, columnId: String) {
@@ -326,7 +405,13 @@ class DiagramEditorViewModel(
         updateColumn(tableId, columnId) { it.copy(isForeignKey = !it.isForeignKey) }
     }
 
-    private fun updateTable(tableId: String, transform: (TableEntity) -> TableEntity) {
+    /**
+     * Централизованная точка мутации таблиц — через неё проходит большинство действий,
+     * поэтому здесь же удобно вести стек отмены. coalesceKey — см. pushUndoSnapshot;
+     * null (по умолчанию) означает "самостоятельное действие", снимок делается всегда.
+     */
+    private fun updateTable(tableId: String, coalesceKey: String? = null, transform: (TableEntity) -> TableEntity) {
+        pushUndoSnapshot(coalesceKey)
         _uiState.value = _uiState.value.copy(
             tables = _uiState.value.tables.map { table ->
                 if (table.id == tableId) transform(table) else table
@@ -334,8 +419,13 @@ class DiagramEditorViewModel(
         )
     }
 
-    private fun updateColumn(tableId: String, columnId: String, transform: (TableColumn) -> TableColumn) {
-        updateTable(tableId) { table ->
+    private fun updateColumn(
+        tableId: String,
+        columnId: String,
+        coalesceKey: String? = null,
+        transform: (TableColumn) -> TableColumn
+    ) {
+        updateTable(tableId, coalesceKey) { table ->
             table.copy(
                 columns = table.columns.map { column ->
                     if (column.id == columnId) transform(column) else column
@@ -347,5 +437,7 @@ class DiagramEditorViewModel(
     companion object {
         /** Шаг сетки в dp. Должен совпадать с шагом точек на холсте (DiagramEditorScreen). */
         const val GRID_STEP = 16f
+        /** Сколько шагов отмены храним одновременно — дальше самые старые просто выталкиваются. */
+        private const val MAX_UNDO_STEPS = 50
     }
 }
