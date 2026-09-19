@@ -2,18 +2,25 @@ package com.vhronin.keyframedb.diagrameditor.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.vhronin.keyframedb.diagrameditor.domain.model.Diagram
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
 import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColumn
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.GetDiagramUseCase
+import com.vhronin.keyframedb.diagrameditor.domain.usecase.SaveDiagramUseCase
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -70,7 +77,8 @@ sealed interface DiagramEditorNavigationEvent {
 
 class DiagramEditorViewModel(
     private val projectId: String,
-    private val getDiagram: GetDiagramUseCase
+    private val getDiagram: GetDiagramUseCase,
+    private val saveDiagram: SaveDiagramUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DiagramEditorUiState(isLoading = true))
@@ -99,20 +107,58 @@ class DiagramEditorViewModel(
     private val _navigationEvents = Channel<DiagramEditorNavigationEvent>(Channel.BUFFERED)
     val navigationEvents: Flow<DiagramEditorNavigationEvent> = _navigationEvents.receiveAsFlow()
 
+    // Последний вариант диаграммы, который точно лежит на диске — null, пока не пришла
+    // первая загрузка (см. init). Служит и "печкой" для сравнения (изменилось ли что-то с
+    // прошлого сохранения), и защитой от гонки: пока он null, автосохранение не пишет на
+    // диск, чтобы не затереть реальные данные пустым состоянием ещё до того, как они загрузились.
+    private var lastPersistedSnapshot: Diagram? = null
+
     init {
         viewModelScope.launch {
             getDiagram(projectId).collect { diagram ->
+                lastPersistedSnapshot = diagram
                 _uiState.value = _uiState.value.copy(
                     projectName = diagram.projectName,
                     tables = diagram.tables,
                     relationships = diagram.relationships,
-                    isLoading = false
+                    isLoading = false,
+                    isSaved = true
                 )
             }
         }
+
+        // Автосохранение: следим за той частью состояния, что реально относится к диаграмме
+        // (имя схемы, таблицы, связи — не за меню/шторками/выделением), и как только она
+        // отличается от lastPersistedSnapshot, сразу гасим "Сохранено" в топ-баре, а сам файл
+        // на диске переписываем с debounce — чтобы не дёргать диск на каждый пиксель
+        // перетаскивания или каждую напечатанную букву, а только когда пользователь ненадолго
+        // остановился.
+        viewModelScope.launch {
+            uiState
+                .map { state -> Diagram(projectId, state.projectName, state.tables, state.relationships) }
+                .distinctUntilChanged()
+                .onEach { snapshot ->
+                    if (lastPersistedSnapshot != null && snapshot != lastPersistedSnapshot) {
+                        _uiState.update { it.copy(isSaved = false) }
+                    }
+                }
+                .debounce(AUTO_SAVE_DEBOUNCE_MS)
+                .collect { snapshot -> persist(snapshot) }
+        }
     }
 
-    /** Двигаем блок таблицы по холсту — чистая UI-логика, пока ничего не сохраняем. */
+    /** Действительно пишет снимок на диск — но только если он ещё не совпадает с уже сохранённым. */
+    private suspend fun persist(snapshot: Diagram) {
+        if (lastPersistedSnapshot == null || snapshot == lastPersistedSnapshot) return
+        saveDiagram(snapshot)
+        lastPersistedSnapshot = snapshot
+        _uiState.update { it.copy(isSaved = true) }
+    }
+
+    /**
+     * Двигаем блок таблицы по холсту. Само перемещение сохранится на диск автоматически
+     * (см. автосохранение в init) — здесь только чистая UI-логика перетаскивания.
+     */
     fun onTableDrag(tableId: String, dx: Float, dy: Float) {
         updateTable(tableId, coalesceKey = "drag:$tableId") { it.copy(x = it.x + dx, y = it.y + dy) }
         // Реальное перемещение уже произошло — вот теперь меню действительно нужно прятать.
@@ -130,8 +176,14 @@ class DiagramEditorViewModel(
     private fun snapToGrid(value: Float): Float =
         (value / GRID_STEP).roundToInt() * GRID_STEP
 
+    /**
+     * Уходя с экрана, не ждём debounce автосохранения — досохраняем немедленно, если
+     * есть что: иначе правка, сделанная за миг до "Назад", могла бы потеряться.
+     */
     fun onBackClick() {
         viewModelScope.launch {
+            val state = _uiState.value
+            persist(Diagram(projectId, state.projectName, state.tables, state.relationships))
             _navigationEvents.send(DiagramEditorNavigationEvent.NavigateBack)
         }
     }
@@ -439,5 +491,7 @@ class DiagramEditorViewModel(
         const val GRID_STEP = 16f
         /** Сколько шагов отмены храним одновременно — дальше самые старые просто выталкиваются. */
         private const val MAX_UNDO_STEPS = 50
+        /** Пауза после последнего изменения, прежде чем автосохранение реально пишет на диск. */
+        private const val AUTO_SAVE_DEBOUNCE_MS = 600L
     }
 }

@@ -3,7 +3,7 @@ package com.vhronin.keyframedb.projectlist.domain.model
 data class Project(
     val id: String,
     val name: String,
-    val updatedAtLabel: String, // человекочитаемая метка вроде "2 часа назад";
-    // позже заменить на реальный timestamp + форматирование в presentation-слое
+    val updatedAt: Long, // время последнего сохранения (epoch millis); человекочитаемую метку
+    // вроде "2 часа назад" строит presentation-слой (см. formatUpdatedAtLabel в ProjectListScreen)
     val tableCount: Int = 0
 )

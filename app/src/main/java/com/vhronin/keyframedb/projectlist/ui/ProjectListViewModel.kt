@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 data class ProjectListUiState(
     val projects: List<Project> = emptyList(),
@@ -30,7 +31,7 @@ data class ProjectListUiState(
  * она просто сообщает "открой редактор" / "куда-то перейди", а экран решает как.
  */
 sealed interface ProjectListNavigationEvent {
-    data class OpenEditor(val projectId: String?) : ProjectListNavigationEvent
+    data class OpenEditor(val projectId: String) : ProjectListNavigationEvent
 }
 
 class ProjectListViewModel(
@@ -43,8 +44,15 @@ class ProjectListViewModel(
     private val _navigationEvents = Channel<ProjectListNavigationEvent>(Channel.BUFFERED)
     val navigationEvents: Flow<ProjectListNavigationEvent> = _navigationEvents.receiveAsFlow()
 
-    init {
+    /**
+     * Список проектов сейчас не "живой" поток (см. JsonProjectRepository) — перечитываем его
+     * явно при каждом появлении экрана (см. LaunchedEffect в ProjectListScreen), а не только
+     * один раз при создании ViewModel: иначе после возврата из редактора список бы не обновился
+     * (ViewModel экрана "Проекты" переживает саму навигацию в редактор и обратно).
+     */
+    fun refreshProjects() {
         viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true)
             getProjects().collect { projects ->
                 _uiState.value = _uiState.value.copy(projects = projects, isLoading = false)
             }
@@ -55,9 +63,10 @@ class ProjectListViewModel(
         _uiState.value = _uiState.value.copy(searchQuery = query)
     }
 
+    /** У каждого нового проекта — свой уникальный id; под ним редактор сохранит первую правку. */
     fun onCreateProjectClick() {
         viewModelScope.launch {
-            _navigationEvents.send(ProjectListNavigationEvent.OpenEditor(projectId = null))
+            _navigationEvents.send(ProjectListNavigationEvent.OpenEditor(projectId = UUID.randomUUID().toString()))
         }
     }
 

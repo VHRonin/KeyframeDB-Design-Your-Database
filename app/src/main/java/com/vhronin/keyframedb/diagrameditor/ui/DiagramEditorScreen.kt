@@ -38,6 +38,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -72,8 +73,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
@@ -88,6 +92,7 @@ import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.theme.KeyframeDBExtendedTheme
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
+import kotlin.math.ceil
 
 // Ширина/высота таблиц выражены в "точках" сетки, а не в произвольных dp —
 // это и есть то, к чему таблицы примагничиваются при перетаскивании (см. GRID_STEP в ViewModel).
@@ -141,10 +146,106 @@ private val MenuWidth = 168.dp
 private val MenuHeightExpanded = 144.dp
 private val MenuMargin = 8.dp
 
-private val TableCardWidth = DotGridStep * TableWidthDots
+// Раньше это была единственная, фиксированная ширина карточки. Теперь это только нижняя
+// граница: карточка не бывает уже этого, но по факту подстраивается под содержимое —
+// см. rememberTableWidths ниже.
+private val TableCardMinWidth = DotGridStep * TableWidthDots
 
 private fun tableHeight(columnCount: Int): Dp =
     DotGridStep * (TableHeaderDots + TableRowDots * columnCount)
+
+// ---- Адаптивная ширина карточки таблицы ----
+//
+// Раскладка ровно повторяет то, что реально рисуют заголовок в TableCard и FieldRow (строка
+// атрибута) ниже — те же стили и отступы, иначе измеренная ширина разъедется с отрисованной.
+
+// Горизонтальные отступы заголовка и строки атрибута (padding(horizontal = 12.dp) в TableCard/FieldRow).
+private val CardHorizontalPadding = 12.dp
+// padding(horizontal = 5.dp) у FieldBadge + Spacer(5.dp) после неё.
+private val BadgeHorizontalPadding = 5.dp
+private val BadgeSpacing = 5.dp
+// Минимальный зазор между именем атрибута и его типом. Строка использует
+// Arrangement.SpaceBetween — без запаса при точно подогнанной под контент ширине карточки
+// имя и тип легли бы вплотную друг к другу.
+private val FieldRowMinGap = 16.dp
+
+/** То, что реально влияет на ширину карточки — имя таблицы и её атрибуты, без x/y. */
+private data class TableContentSignature(val name: String, val columns: List<TableColumn>)
+
+/**
+ * Ширина карточки под содержимое конкретной таблицы, с полом в TableCardMinWidth и
+ * округлением вверх до шага сетки (чтобы правый край карточки, как и раньше, попадал
+ * в точку сетки — сама сетка ведь только этому и служит).
+ */
+private fun computeTableCardWidth(
+    signature: TableContentSignature,
+    textMeasurer: TextMeasurer,
+    headerStyle: TextStyle,
+    nameStyle: TextStyle,
+    typeStyle: TextStyle,
+    badgeStyle: TextStyle,
+    density: Density
+): Dp {
+    fun measuredWidth(text: String, style: TextStyle): Dp =
+        with(density) { textMeasurer.measure(text, style).size.width.toDp() }
+
+    val headerWidth = measuredWidth(signature.name.ifBlank { " " }, headerStyle) + CardHorizontalPadding * 2
+
+    val rowWidths = signature.columns.map { column ->
+        var leftGroupWidth = measuredWidth(column.name.ifBlank { "…" }, nameStyle)
+        if (column.isPrimaryKey) {
+            leftGroupWidth += measuredWidth("PK", badgeStyle) + BadgeHorizontalPadding * 2 + BadgeSpacing
+        }
+        if (column.isForeignKey) {
+            leftGroupWidth += measuredWidth("FK", badgeStyle) + BadgeHorizontalPadding * 2 + BadgeSpacing
+        }
+        val typeWidth = measuredWidth(column.type, typeStyle)
+        CardHorizontalPadding * 2 + leftGroupWidth + FieldRowMinGap + typeWidth
+    }
+
+    val contentWidth = (rowWidths + headerWidth).maxOrNull()?.coerceAtLeast(TableCardMinWidth) ?: TableCardMinWidth
+    val steps = ceil(contentWidth.value / DotGridStep.value).toInt()
+    return DotGridStep * steps
+}
+
+/**
+ * Ширины карточек для всех таблиц на холсте — одним источником для TableCard (рисует карточку)
+ * и ConnectorLines (считает, откуда и куда идут линии связей), чтобы не разъезжались.
+ *
+ * Ключ remember — не сам `tables`, а его "сигнатуры" (имя + атрибуты, без x/y): перетаскивание
+ * таблицы на каждый кадр меняет только позицию, и без этого пересчёт измерения текста для
+ * ВСЕХ таблиц гонялся бы на каждый пиксель драга.
+ */
+@Composable
+private fun rememberTableWidths(tables: List<TableEntity>): Map<String, Dp> {
+    val textMeasurer = rememberTextMeasurer()
+    // Бейдж и тип рисуются без явного базового style (см. FieldBadge/FieldRow) — их итоговый
+    // стиль это LocalTextStyle.current с точечными override'ами fontSize/fontWeight/fontFamily.
+    // Меряем тем же сочетанием, а не голым TextStyle(...), чтобы ширина не разъехалась с тем,
+    // что реально нарисуется.
+    val baseTextStyle = LocalTextStyle.current
+    val headerStyle = MaterialTheme.typography.titleMedium
+    val nameStyle = MaterialTheme.typography.bodySmall
+    val typeStyle = baseTextStyle.copy(fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+    val badgeStyle = baseTextStyle.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold)
+    val density = LocalDensity.current
+
+    val signatures = tables.map { it.id to TableContentSignature(it.name, it.columns) }
+
+    return remember(signatures, textMeasurer, headerStyle, nameStyle, typeStyle, badgeStyle, density) {
+        signatures.associate { (id, signature) ->
+            id to computeTableCardWidth(
+                signature = signature,
+                textMeasurer = textMeasurer,
+                headerStyle = headerStyle,
+                nameStyle = nameStyle,
+                typeStyle = typeStyle,
+                badgeStyle = badgeStyle,
+                density = density
+            )
+        }
+    }
+}
 
 @Composable
 fun DiagramEditorScreen(
@@ -414,6 +515,9 @@ private fun DiagramCanvas(
 ) {
     val dotColor = MaterialTheme.colorScheme.outline
     val density = LocalDensity.current
+    // Единый источник ширины карточки на таблицу — им пользуются и сами карточки ниже,
+    // и ConnectorLines (концы линий связей должны упираться именно в край карточки).
+    val tableWidths = rememberTableWidths(tables)
 
     // pointerInput(Unit) ниже живёт на весь жизненный цикл холста и не перезапускается —
     // поэтому, как и в TableCard, читаем/пишем камеру через rememberUpdatedState, а не напрямую
@@ -467,6 +571,7 @@ private fun DiagramCanvas(
             ConnectorLines(
                 tables = tables,
                 relationships = relationships,
+                tableWidths = tableWidths,
                 onRelationshipClick = if (isLinking) null else onRelationshipBadgeClick
             )
 
@@ -476,6 +581,7 @@ private fun DiagramCanvas(
                 key(table.id) {
                     TableCard(
                         table = table,
+                        width = tableWidths[table.id] ?: TableCardMinWidth,
                         accentColor = table.color.toComposeColor(),
                         isSelected = selectedTableId == table.id,
                         isDragging = draggingTableId == table.id,
@@ -699,6 +805,7 @@ private fun Float.safeMod(step: Float): Float = ((this % step) + step) % step
 private fun ConnectorLines(
     tables: List<TableEntity>,
     relationships: List<Relationship>,
+    tableWidths: Map<String, Dp>,
     onRelationshipClick: ((relationshipId: String) -> Unit)?
 ) {
     val density = LocalDensity.current
@@ -709,10 +816,11 @@ private fun ConnectorLines(
         relationships.forEach { relationship ->
             val from = tablesById[relationship.fromTableId] ?: return@forEach
             val to = tablesById[relationship.toTableId] ?: return@forEach
+            val fromWidth = tableWidths[from.id] ?: TableCardMinWidth
 
             val start = with(density) {
                 Offset(
-                    x = (from.x.dp + TableCardWidth).toPx(),
+                    x = (from.x.dp + fromWidth).toPx(),
                     y = (from.y.dp + tableHeight(from.columns.size) / 2).toPx()
                 )
             }
@@ -745,7 +853,8 @@ private fun ConnectorLines(
     relationships.forEach { relationship ->
         val from = tablesById[relationship.fromTableId] ?: return@forEach
         val to = tablesById[relationship.toTableId] ?: return@forEach
-        val midX = (from.x + to.x + TableCardWidth.value) / 2f
+        val fromWidth = tableWidths[from.id] ?: TableCardMinWidth
+        val midX = (from.x + fromWidth.value + to.x) / 2f
         val midY = (from.y + to.y) / 2f + 12f
         RelationLabel(
             text = relationship.type.shortLabel,
@@ -773,6 +882,7 @@ private fun RelationLabel(text: String, onClick: (() -> Unit)?, modifier: Modifi
 @Composable
 private fun TableCard(
     table: TableEntity,
+    width: Dp,
     accentColor: Color,
     isSelected: Boolean,
     isDragging: Boolean,
@@ -808,7 +918,7 @@ private fun TableCard(
     Column(modifier = modifier.offset(x = table.x.dp, y = table.y.dp)) {
         Column(
             modifier = Modifier
-                .width(TableCardWidth)
+                .width(width)
                 .scale(cardScale)
                 .shadow(
                     elevation = when {

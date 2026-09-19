@@ -5,4 +5,5 @@ import kotlinx.coroutines.flow.Flow
 
 interface DiagramRepository {
     fun observeDiagram(projectId: String): Flow<Diagram>
+    suspend fun saveDiagram(diagram: Diagram)
 }

@@ -35,6 +35,6 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MyPreview() {
     KeyframeDBTheme {
-        DiagramEditorScreen()
+        DiagramEditorScreen(projectId = "preview")
     }
 }

@@ -1,5 +1,8 @@
 package com.vhronin.keyframedb.diagrameditor.domain.model
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class Relationship(
     val id: String,
     val fromTableId: String,

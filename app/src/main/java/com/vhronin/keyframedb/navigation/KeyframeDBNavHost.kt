@@ -22,16 +22,12 @@ fun KeyframeDBNavHost(navController: NavHostController) {
 
         composable(
             route = Destination.DiagramEditor.name,
-            arguments = listOf(navArgument("projectId") {
-                type = NavType.StringType
-                nullable = true
-                defaultValue = null
-            })
+            arguments = listOf(navArgument("projectId") { type = NavType.StringType })
         ) { backStackEntry ->
-            val projectId = backStackEntry.arguments?.getString("projectId")
+            val projectId = backStackEntry.arguments?.getString("projectId").orEmpty()
 
             DiagramEditorScreen(
-                projectId = projectId ?: "1",
+                projectId = projectId,
                 onNavigateBack = { navController.popBackStack() }
             )
         }

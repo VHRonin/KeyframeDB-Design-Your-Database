@@ -32,13 +32,25 @@ import androidx.compose.ui.unit.dp
 import com.vhronin.keyframedb.theme.KeyframeDBColors
 import com.vhronin.keyframedb.projectlist.domain.model.Project
 import org.koin.androidx.compose.koinViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.abs
 
 @Composable
 fun ProjectListScreen(
-    onNavigateToEditor: (String?) -> Unit = {},
+    onNavigateToEditor: (String) -> Unit = {},
     viewModel: ProjectListViewModel = koinViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+
+    // Список проектов — не живой поток (см. ProjectRepository.observeProjects), поэтому
+    // перечитываем его при каждом появлении экрана: и при первом открытии, и при возврате
+    // из редактора (попадание сюда снова — это повторный вход в композицию, эффект
+    // перезапустится сам).
+    LaunchedEffect(Unit) {
+        viewModel.refreshProjects()
+    }
 
     LaunchedEffect(Unit) {
         viewModel.navigationEvents.collect { event ->
@@ -165,7 +177,7 @@ private fun ProjectCard(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = project.updatedAtLabel,
+                text = formatUpdatedAtLabel(project.updatedAt),
                 style = MaterialTheme.typography.bodySmall,
                 color = KeyframeDBColors.InkMuted
             )
@@ -176,6 +188,38 @@ private fun ProjectCard(
             contentDescription = null,
             tint = KeyframeDBColors.InkFaint
         )
+    }
+}
+
+/**
+ * "Изменено N минут/часов/дней назад" из timestamp последнего сохранения. Правильные русские
+ * окончания важны — без них "2 часа" выглядело бы так же криво, как "5 часа".
+ */
+private fun formatUpdatedAtLabel(updatedAt: Long, now: Long = System.currentTimeMillis()): String {
+    val diffMs = (now - updatedAt).coerceAtLeast(0)
+    val minutes = diffMs / 60_000
+    val hours = diffMs / 3_600_000
+    val days = diffMs / 86_400_000
+
+    return when {
+        minutes < 1 -> "Изменено только что"
+        minutes < 60 -> "Изменено ${minutes} ${pluralForm(minutes, "минуту", "минуты", "минут")} назад"
+        hours < 24 -> "Изменено ${hours} ${pluralForm(hours, "час", "часа", "часов")} назад"
+        days == 1L -> "Изменено вчера"
+        days < 7 -> "Изменено ${days} ${pluralForm(days, "день", "дня", "дней")} назад"
+        else -> "Изменено ${SimpleDateFormat("d MMMM", Locale("ru")).format(Date(updatedAt))}"
+    }
+}
+
+/** Русское склонение по числительному: 1 минута, 2 минуты, 5 минут, 11 минут, 21 минута... */
+private fun pluralForm(count: Long, one: String, few: String, many: String): String {
+    val mod100 = abs(count) % 100
+    val mod10 = mod100 % 10
+    return when {
+        mod100 in 11L..14L -> many
+        mod10 == 1L -> one
+        mod10 in 2L..4L -> few
+        else -> many
     }
 }
 
