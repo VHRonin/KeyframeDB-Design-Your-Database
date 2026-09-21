@@ -10,4 +10,6 @@ interface ProjectRepository {
      * нужно подписаться заново.
      */
     fun observeProjects(): Flow<List<Project>>
+
+    suspend fun deleteProject(projectId: String)
 }

@@ -12,12 +12,16 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -101,11 +105,20 @@ fun ProjectListScreen(
                 items(uiState.visibleProjects, key = { it.id }) { project ->
                     ProjectCard(
                         project = project,
-                        onClick = { viewModel.onProjectClick(project) }
+                        onClick = { viewModel.onProjectClick(project) },
+                        onDeleteClick = { viewModel.onDeleteProjectClick(project) }
                     )
                 }
             }
         }
+    }
+
+    uiState.pendingDeleteProject?.let { project ->
+        DeleteProjectDialog(
+            projectName = project.name,
+            onConfirm = viewModel::onDeleteProjectConfirmed,
+            onDismiss = viewModel::onDeleteProjectDismiss
+        )
     }
 }
 
@@ -153,7 +166,8 @@ private fun SearchField(
 @Composable
 private fun ProjectCard(
     project: Project,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onDeleteClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -162,7 +176,7 @@ private fun ProjectCard(
             .background(MaterialTheme.colorScheme.surface)
             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
             .clickable(onClick = onClick)
-            .padding(12.dp),
+            .padding(start = 12.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -183,12 +197,43 @@ private fun ProjectCard(
             )
         }
 
+        IconButton(onClick = onDeleteClick) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "Удалить схему",
+                tint = KeyframeDBColors.InkFaint
+            )
+        }
+
         Icon(
             imageVector = Icons.Default.ChevronRight,
             contentDescription = null,
             tint = KeyframeDBColors.InkFaint
         )
     }
+}
+
+@Composable
+private fun DeleteProjectDialog(
+    projectName: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Удалить схему?") },
+        text = { Text("Схема «$projectName» будет удалена без возможности восстановления.") },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Удалить", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена")
+            }
+        }
+    )
 }
 
 /**

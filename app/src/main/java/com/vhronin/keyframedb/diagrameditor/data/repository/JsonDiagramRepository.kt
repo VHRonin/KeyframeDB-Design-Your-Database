@@ -2,6 +2,7 @@ package com.vhronin.keyframedb.diagrameditor.data.repository
 
 import android.content.Context
 import com.vhronin.keyframedb.diagrameditor.domain.model.Diagram
+import com.vhronin.keyframedb.diagrameditor.domain.model.DiagramSummary
 import com.vhronin.keyframedb.diagrameditor.domain.repository.DiagramRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -64,6 +65,32 @@ class JsonDiagramRepository(
             }
         }
         cacheFlowFor(diagram.projectId).value = diagram
+    }
+
+    override suspend fun deleteDiagram(projectId: String) {
+        withContext(Dispatchers.IO) {
+            writeMutex.withLock {
+                fileFor(projectId).delete()
+            }
+        }
+        // Удаляем и из кэша, а не просто с диска — иначе всё ещё живая (маловероятно, но
+        // не невозможно) подписка на observeDiagram(projectId) продолжала бы отдавать старые
+        // данные из памяти как ни в чём не бывало.
+        cache.remove(projectId)
+    }
+
+    override suspend fun getAllDiagrams(): List<DiagramSummary> = withContext(Dispatchers.IO) {
+        val files = diagramsDir.listFiles { file -> file.isFile && file.extension == "json" }
+            ?: emptyArray()
+
+        files.mapNotNull { file ->
+            runCatching {
+                DiagramSummary(
+                    diagram = json.decodeFromString<Diagram>(file.readText()),
+                    updatedAt = file.lastModified()
+                )
+            }.getOrNull()
+        }
     }
 
     private suspend fun cacheFlowFor(projectId: String): MutableStateFlow<Diagram> {

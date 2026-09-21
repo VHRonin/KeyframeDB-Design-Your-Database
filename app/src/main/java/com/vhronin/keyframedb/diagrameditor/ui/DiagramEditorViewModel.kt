@@ -8,6 +8,7 @@ import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColumn
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
+import com.vhronin.keyframedb.diagrameditor.domain.usecase.GenerateDefaultDiagramNameUseCase
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.GetDiagramUseCase
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.SaveDiagramUseCase
 import kotlinx.coroutines.channels.Channel
@@ -78,7 +79,8 @@ sealed interface DiagramEditorNavigationEvent {
 class DiagramEditorViewModel(
     private val projectId: String,
     private val getDiagram: GetDiagramUseCase,
-    private val saveDiagram: SaveDiagramUseCase
+    private val saveDiagram: SaveDiagramUseCase,
+    private val generateDefaultDiagramName: GenerateDefaultDiagramNameUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DiagramEditorUiState(isLoading = true))
@@ -116,13 +118,21 @@ class DiagramEditorViewModel(
     init {
         viewModelScope.launch {
             getDiagram(projectId).collect { diagram ->
+                // lastPersistedSnapshot остаётся как есть на диске (в том числе с пустым
+                // именем) — а не resolvedName ниже: иначе автосохранение не увидит разницы
+                // и никогда не запишет на диск сгенерированное имя новой схемы.
                 lastPersistedSnapshot = diagram
+                // Пустое имя означает, что схему вообще ни разу не сохраняли (см.
+                // JsonDiagramRepository.readFromDisk) — переименование всегда требует
+                // непустой строки (см. RenameProjectSheet), так что у реально сохранённой
+                // схемы имя пустым быть не может.
+                val resolvedName = diagram.projectName.ifBlank { generateDefaultDiagramName() }
                 _uiState.value = _uiState.value.copy(
-                    projectName = diagram.projectName,
+                    projectName = resolvedName,
                     tables = diagram.tables,
                     relationships = diagram.relationships,
                     isLoading = false,
-                    isSaved = true
+                    isSaved = resolvedName == diagram.projectName
                 )
             }
         }

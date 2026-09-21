@@ -142,7 +142,7 @@ private fun TableColor.toComposeColor(): Color = when (this) {
 }
 
 private val MenuWidth = 168.dp
-// В меню три пункта: Редактировать / Переименовать сущность / Связь.
+// В меню три пункта: Редактировать / Переименовать / Связь.
 private val MenuHeightExpanded = 144.dp
 private val MenuMargin = 8.dp
 
@@ -749,7 +749,7 @@ private fun TableActionMenu(
     ) {
         MenuAction(icon = Icons.Default.Edit, label = "Редактировать", onClick = onEditAttributesClick)
         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-        MenuAction(icon = Icons.Default.DriveFileRenameOutline, label = "Переименовать сущность", onClick = onRenameClick)
+        MenuAction(icon = Icons.Default.DriveFileRenameOutline, label = "Переименовать", onClick = onRenameClick)
         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
         MenuAction(icon = Icons.Default.Link, label = "Связь", onClick = onBuildRelationClick)
     }

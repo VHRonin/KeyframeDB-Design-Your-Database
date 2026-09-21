@@ -3,6 +3,7 @@ package com.vhronin.keyframedb.projectlist.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vhronin.keyframedb.projectlist.domain.model.Project
+import com.vhronin.keyframedb.projectlist.domain.usecase.DeleteProjectUseCase
 import com.vhronin.keyframedb.projectlist.domain.usecase.GetProjectsUseCase
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -16,7 +17,11 @@ import java.util.UUID
 data class ProjectListUiState(
     val projects: List<Project> = emptyList(),
     val searchQuery: String = "",
-    val isLoading: Boolean = false
+    val isLoading: Boolean = false,
+    // Проект, для которого сейчас показан диалог подтверждения удаления — сам факт удаления
+    // необратим, поэтому без явного подтверждения не обойтись (в отличие от прочих действий
+    // на этом экране).
+    val pendingDeleteProject: Project? = null
 ) {
     val visibleProjects: List<Project>
         get() = if (searchQuery.isBlank()) {
@@ -35,7 +40,8 @@ sealed interface ProjectListNavigationEvent {
 }
 
 class ProjectListViewModel(
-    private val getProjects: GetProjectsUseCase
+    private val getProjects: GetProjectsUseCase,
+    private val deleteProject: DeleteProjectUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ProjectListUiState(isLoading = true))
@@ -73,6 +79,24 @@ class ProjectListViewModel(
     fun onProjectClick(project: Project) {
         viewModelScope.launch {
             _navigationEvents.send(ProjectListNavigationEvent.OpenEditor(projectId = project.id))
+        }
+    }
+
+    /** Открывает диалог подтверждения — само удаление происходит только в onDeleteProjectConfirmed. */
+    fun onDeleteProjectClick(project: Project) {
+        _uiState.value = _uiState.value.copy(pendingDeleteProject = project)
+    }
+
+    fun onDeleteProjectDismiss() {
+        _uiState.value = _uiState.value.copy(pendingDeleteProject = null)
+    }
+
+    fun onDeleteProjectConfirmed() {
+        val project = _uiState.value.pendingDeleteProject ?: return
+        viewModelScope.launch {
+            deleteProject(project.id)
+            _uiState.value = _uiState.value.copy(pendingDeleteProject = null)
+            refreshProjects()
         }
     }
 }
