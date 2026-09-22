@@ -1,5 +1,9 @@
 package com.vhronin.keyframedb.diagrameditor.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -32,6 +36,7 @@ import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -72,6 +77,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
@@ -84,6 +90,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
 import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
@@ -92,6 +99,7 @@ import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.theme.KeyframeDBExtendedTheme
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
+import java.io.File
 import kotlin.math.ceil
 
 // Ширина/высота таблиц выражены в "точках" сетки, а не в произвольных dp —
@@ -254,6 +262,7 @@ fun DiagramEditorScreen(
     viewModel: DiagramEditorViewModel = koinViewModel(parameters = { parametersOf(projectId) })
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
 
     // Камера холста живёт здесь, а не внутри DiagramCanvas — тулбар с кнопками зума лежит
     // рядом с холстом (сосед по Box), а не внутри него, и тоже должен уметь ей управлять.
@@ -265,6 +274,12 @@ fun DiagramEditorScreen(
         viewModel.navigationEvents.collect { event ->
             when (event) {
                 DiagramEditorNavigationEvent.NavigateBack -> onNavigateBack()
+                is DiagramEditorNavigationEvent.SharePdf -> sharePdf(context, event.file)
+                DiagramEditorNavigationEvent.ExportFailed -> Toast.makeText(
+                    context,
+                    "Не удалось экспортировать PDF",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
         }
     }
@@ -279,6 +294,7 @@ fun DiagramEditorScreen(
                 projectName = uiState.projectName,
                 isSaved = uiState.isSaved,
                 canUndo = uiState.canUndo,
+                isExporting = uiState.isExporting,
                 onBackClick = viewModel::onBackClick,
                 onUndoClick = viewModel::onUndoClick,
                 onExportClick = viewModel::onExportClick,
@@ -417,6 +433,7 @@ private fun EditorTopBar(
     projectName: String,
     isSaved: Boolean,
     canUndo: Boolean,
+    isExporting: Boolean,
     onBackClick: () -> Unit,
     onUndoClick: () -> Unit,
     onExportClick: () -> Unit,
@@ -471,14 +488,43 @@ private fun EditorTopBar(
                 tint = if (canUndo) MaterialTheme.colorScheme.onBackground else KeyframeDBExtendedTheme.colors.inkMuted
             )
         }
-        IconButton(onClick = onExportClick) {
-            Icon(
-                imageVector = Icons.Default.FileDownload,
-                contentDescription = "Экспорт в PDF",
-                tint = MaterialTheme.colorScheme.onBackground
-            )
+        IconButton(onClick = onExportClick, enabled = !isExporting) {
+            if (isExporting) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.FileDownload,
+                    contentDescription = "Экспорт в PDF",
+                    tint = MaterialTheme.colorScheme.onBackground
+                )
+            }
         }
     }
+}
+
+/**
+ * Открывает системный диалог "Поделиться" для готового PDF — через FileProvider, т.к. начиная
+ * с Android N голый file:// Uri в Intent между приложениями запрещён (StrictMode/FileUriExposedException).
+ * authority "$packageName.fileprovider" должен быть объявлен в AndroidManifest.xml (см. res/xml/file_paths.xml).
+ */
+private fun sharePdf(context: Context, file: File) {
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "application/pdf"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    val chooser = Intent.createChooser(intent, "Поделиться диаграммой")
+    // LocalContext в Compose обычно и есть сама Activity, но на случай обёрнутого контекста —
+    // без NEW_TASK запуск Activity из не-Activity контекста упадёт с исключением.
+    if (context !is Activity) {
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(chooser)
 }
 
 @Composable

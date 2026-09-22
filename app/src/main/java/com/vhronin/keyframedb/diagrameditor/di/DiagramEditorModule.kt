@@ -1,7 +1,10 @@
 package com.vhronin.keyframedb.diagrameditor.di
 
 import com.vhronin.keyframedb.diagrameditor.data.repository.JsonDiagramRepository
+import com.vhronin.keyframedb.diagrameditor.data.repository.PdfDiagramExporter
+import com.vhronin.keyframedb.diagrameditor.domain.repository.DiagramPdfExporter
 import com.vhronin.keyframedb.diagrameditor.domain.repository.DiagramRepository
+import com.vhronin.keyframedb.diagrameditor.domain.usecase.ExportDiagramToPdfUseCase
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.GenerateDefaultDiagramNameUseCase
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.GetDiagramUseCase
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.SaveDiagramUseCase
@@ -12,8 +15,10 @@ import org.koin.dsl.module
 
 val diagramEditorModule = module {
     single<DiagramRepository> { JsonDiagramRepository(androidContext()) }
+    single<DiagramPdfExporter> { PdfDiagramExporter(androidContext()) }
     factory { GetDiagramUseCase(get()) }
     factory { SaveDiagramUseCase(get()) }
     factory { GenerateDefaultDiagramNameUseCase(get()) }
-    viewModel { (projectId: String) -> DiagramEditorViewModel(projectId, get(), get(), get()) }
+    factory { ExportDiagramToPdfUseCase(get()) }
+    viewModel { (projectId: String) -> DiagramEditorViewModel(projectId, get(), get(), get(), get()) }
 }

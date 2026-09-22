@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- context.cacheDir/exports — сюда PdfDiagramExporter кладёт готовые PDF
+         (см. diagrameditor/data/repository/PdfDiagramExporter.kt). Именно cache-path,
+         а не external-path: файлом делимся сразу через Intent.ACTION_SEND, во внешнее
+         хранилище пользователя ничего сохранять не требуется. -->
+    <cache-path name="diagram_exports" path="exports/" />
+</paths>

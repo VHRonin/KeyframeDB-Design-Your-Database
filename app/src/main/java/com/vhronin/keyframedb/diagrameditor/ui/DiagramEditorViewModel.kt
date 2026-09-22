@@ -8,6 +8,7 @@ import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColumn
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
+import com.vhronin.keyframedb.diagrameditor.domain.usecase.ExportDiagramToPdfUseCase
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.GenerateDefaultDiagramNameUseCase
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.GetDiagramUseCase
 import com.vhronin.keyframedb.diagrameditor.domain.usecase.SaveDiagramUseCase
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -68,19 +70,30 @@ data class DiagramEditorUiState(
     // Шторка переименования самой схемы (тап по названию в топ-баре) — своё имя без ref на таблицу.
     val isRenamingProject: Boolean = false,
     // Есть ли что отменять — только чтобы притушить кнопку "Отменить" в топ-баре, когда стек пуст.
-    val canUndo: Boolean = false
+    val canUndo: Boolean = false,
+    // Идёт рендер PDF в фоне (см. onExportClick) — кнопка экспорта в топ-баре на это время
+    // блокируется и показывает вместо иконки спиннер, чтобы повторный тап не запускал
+    // параллельный экспорт того же файла.
+    val isExporting: Boolean = false
 )
 
 /** Одноразовые события навигации — по той же схеме, что и в ProjectListViewModel. */
 sealed interface DiagramEditorNavigationEvent {
     data object NavigateBack : DiagramEditorNavigationEvent
+
+    /** PDF готов на диске — экран открывает системный диалог "Поделиться" через FileProvider. */
+    data class SharePdf(val file: File) : DiagramEditorNavigationEvent
+
+    /** Экспорт не удался (например, ошибка записи на диск) — экран покажет короткое сообщение. */
+    data object ExportFailed : DiagramEditorNavigationEvent
 }
 
 class DiagramEditorViewModel(
     private val projectId: String,
     private val getDiagram: GetDiagramUseCase,
     private val saveDiagram: SaveDiagramUseCase,
-    private val generateDefaultDiagramName: GenerateDefaultDiagramNameUseCase
+    private val generateDefaultDiagramName: GenerateDefaultDiagramNameUseCase,
+    private val exportDiagramToPdf: ExportDiagramToPdfUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DiagramEditorUiState(isLoading = true))
@@ -219,8 +232,26 @@ class DiagramEditorViewModel(
         )
     }
 
+    /**
+     * Кнопка экспорта в топ-баре — рендерит PDF из ТЕКУЩЕГО состояния на экране (а не из
+     * последней сохранённой на диск версии, см. lastPersistedSnapshot): пользователь ждёт
+     * "экспортируй то, что я вижу", а не то, что успело долежать до автосохранения.
+     * Сам PDF рендерится в фоне (см. PdfDiagramExporter), поэтому UI не блокируется —
+     * isExporting только не даёт запустить второй экспорт поверх первого.
+     */
     fun onExportClick() {
-        // Пока без реализации — появится вместе с PDF-экспортом
+        if (_uiState.value.isExporting) return
+        val state = _uiState.value
+        val diagram = Diagram(projectId, state.projectName, state.tables, state.relationships)
+        _uiState.value = state.copy(isExporting = true)
+        viewModelScope.launch {
+            val result = runCatching { exportDiagramToPdf(diagram) }
+            _uiState.value = _uiState.value.copy(isExporting = false)
+            result.fold(
+                onSuccess = { file -> _navigationEvents.send(DiagramEditorNavigationEvent.SharePdf(file)) },
+                onFailure = { _navigationEvents.send(DiagramEditorNavigationEvent.ExportFailed) }
+            )
+        }
     }
 
     /** Тап по названию схемы в топ-баре — открывает шторку переименования. */
