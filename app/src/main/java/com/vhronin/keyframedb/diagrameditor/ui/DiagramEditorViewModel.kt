@@ -360,6 +360,23 @@ class DiagramEditorViewModel(
         updateTable(tableId, coalesceKey = "table-color:$tableId") { it.copy(color = color) }
     }
 
+    /**
+     * Кнопка "Удалить таблицу" в шторке переименования — вместе с таблицей удаляем и все связи,
+     * которые её касались (иначе они остались бы висеть на несуществующий id — DiagramCanvas/
+     * PdfDiagramExporter такие молча пропускают через ?: return@forEach, но смысла в них уже нет).
+     */
+    fun onDeleteTable(tableId: String) {
+        pushUndoSnapshot()
+        val state = _uiState.value
+        _uiState.value = state.copy(
+            tables = state.tables.filterNot { it.id == tableId },
+            relationships = state.relationships.filterNot { it.fromTableId == tableId || it.toTableId == tableId },
+            renamingTableId = null,
+            selectedTableId = state.selectedTableId.takeIf { it != tableId },
+            attributeEditingTableId = state.attributeEditingTableId.takeIf { it != tableId }
+        )
+    }
+
     /** Кнопка "Связь" в плавающем меню — входим в режим связывания с уже известной первой таблицей. */
     fun onBuildRelationshipClick(tableId: String) {
         _uiState.value = _uiState.value.copy(

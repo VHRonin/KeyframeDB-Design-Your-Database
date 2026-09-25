@@ -9,6 +9,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import com.vhronin.keyframedb.diagrameditor.domain.model.Diagram
+import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
 import com.vhronin.keyframedb.diagrameditor.domain.repository.DiagramPdfExporter
@@ -19,6 +20,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.ceil
 
 /**
@@ -124,19 +126,57 @@ class PdfDiagramExporter(
             val to = tablesById[relationship.toTableId] ?: return@forEach
             val fromWidth = layout.widthOf(from)
 
-            val startX = from.x + fromWidth
-            val startY = from.y + tableHeight(from.columns.size) / 2f
-            val endX = to.x
-            val endY = to.y + tableHeight(to.columns.size) / 2f
-            val controlOffsetX = (endX - startX) * 0.6f
+            val start = Pt(from.x + fromWidth, from.y + tableHeight(from.columns.size) / 2f)
+            val end = Pt(to.x, to.y + tableHeight(to.columns.size) / 2f)
+
+            // Фиксированный горизонтальный "хвостик" на выходе из from и на входе в to — та же
+            // логика, что и в ConnectorLines в DiagramEditorScreen.kt (см. комментарий у
+            // drawCardinalityMarker там же): независимо от того, где на самом деле стоит вторая
+            // таблица, первые ConnectorStubPt связь идёт прямо и строго горизонтально, и только
+            // между концами хвостиков плавно поворачивает к цели.
+            val stubOut = Pt(start.x + ConnectorStubPt, start.y)
+            val stubIn = Pt(end.x - ConnectorStubPt, end.y)
+
+            // Смещение контрольных точек — от БОЛЬШЕГО из dx/dy между хвостиками, а не только от
+            // dx (та же логика и то же обоснование, что и в ConnectorLines в DiagramEditorScreen.kt).
+            val dx = stubIn.x - stubOut.x
+            val dy = stubIn.y - stubOut.y
+            val controlOffset = maxOf(abs(dx) * 0.6f, abs(dy) * 0.4f, ConnectorMinCurveOffsetPt)
+            val midControl1 = Pt(stubOut.x + controlOffset, stubOut.y)
+            val midControl2 = Pt(stubIn.x - controlOffset, stubIn.y)
 
             val path = Path().apply {
-                moveTo(startX, startY)
-                cubicTo(startX + controlOffsetX, startY, endX - controlOffsetX, endY, endX, endY)
+                moveTo(start.x, start.y)
+                lineTo(stubOut.x, stubOut.y)
+                cubicTo(midControl1.x, midControl1.y, midControl2.x, midControl2.y, stubIn.x, stubIn.y)
+                lineTo(end.x, end.y)
             }
             canvas.drawPath(path, paints.connectorLine)
-            canvas.drawCircle(startX, startY, ConnectorDotRadiusPt, paints.connectorDot)
-            canvas.drawCircle(endX, endY, ConnectorDotRadiusPt, paints.connectorDot)
+
+            drawCardinalityMarker(canvas, start, Pt(1f, 0f), relationship.type.isManyAt(isFromEnd = true), paints.connectorLine)
+            drawCardinalityMarker(canvas, end, Pt(-1f, 0f), relationship.type.isManyAt(isFromEnd = false), paints.connectorLine)
+        }
+    }
+
+    /**
+     * Та же ER-нотация "вороньей лапки", что и на холсте (см. drawCardinalityMarker в
+     * DiagramEditorScreen.kt): одна перпендикулярная чёрточка — "один", раздвоенные ножки — "много".
+     * `outward` здесь всегда строго горизонтален — гарантирован фиксированным хвостиком связи
+     * (см. ConnectorStubPt в drawConnectors).
+     */
+    private fun drawCardinalityMarker(canvas: Canvas, point: Pt, outward: Pt, isMany: Boolean, linePaint: Paint) {
+        val perp = Pt(-outward.y, outward.x)
+        if (isMany) {
+            val back = point + outward * MarkerReachPt
+            val legA = back - perp * MarkerSpreadPt
+            val legB = back + perp * MarkerSpreadPt
+            canvas.drawLine(legA.x, legA.y, point.x, point.y, linePaint)
+            canvas.drawLine(legB.x, legB.y, point.x, point.y, linePaint)
+        } else {
+            val tickCenter = point + outward * (MarkerReachPt * 0.65f)
+            val tickA = tickCenter - perp * MarkerSpreadPt
+            val tickB = tickCenter + perp * MarkerSpreadPt
+            canvas.drawLine(tickA.x, tickA.y, tickB.x, tickB.y, linePaint)
         }
     }
 
@@ -257,6 +297,13 @@ private fun Paint.baselineForCenter(centerY: Float): Float {
     return centerY - (fm.ascent + fm.descent) / 2f
 }
 
+/** Минимальный набор векторной арифметики для геометрии связей — без лишней зависимости от android.graphics.PointF. */
+private data class Pt(val x: Float, val y: Float) {
+    operator fun plus(other: Pt) = Pt(x + other.x, y + other.y)
+    operator fun minus(other: Pt) = Pt(x - other.x, y - other.y)
+    operator fun times(scale: Float) = Pt(x * scale, y * scale)
+}
+
 /** См. tableHeight(columnCount) в DiagramEditorScreen.kt — та же формула. */
 private fun tableHeight(columnCount: Int): Float = GridStepPt * (TableHeaderDots + TableRowDots * columnCount)
 
@@ -305,21 +352,34 @@ private class PdfDiagramLayout(diagram: Diagram, paints: PdfPaints) {
             contentOffsetY = 0f
         } else {
             val tablesById = diagram.tables.associateBy { it.id }
-            val minX = diagram.tables.minOf { it.x }
+            var minX = diagram.tables.minOf { it.x }
             val minY = diagram.tables.minOf { it.y }
             var maxX = diagram.tables.maxOf { it.x + (widths[it.id] ?: TableCardMinWidthPt) }
             var maxY = diagram.tables.maxOf { it.y + tableHeight(it.columns.size) }
 
             // Подпись связи может высунуться за нижний/правый край крайних таблиц (см. midY в
-            // ConnectorLines) — расширяем bounding box под неё, а не обрезаем на странице.
+            // ConnectorLines), а переходная кривая между хвостиками (см. controlOffset в
+            // drawConnectors) — за левый/правый: расширяем bounding box под них, а не обрезаем.
+            // Смещение контрольных точек само может оказаться больше ConnectorStubPt (оно растёт и
+            // от перепада по Y), поэтому считаем его так же, как и при самой отрисовке связи.
             diagram.relationships.forEach { relationship ->
                 val from = tablesById[relationship.fromTableId] ?: return@forEach
                 val to = tablesById[relationship.toTableId] ?: return@forEach
                 val fromWidth = widths[from.id] ?: TableCardMinWidthPt
                 val chipLeft = (from.x + fromWidth + to.x) / 2f
                 val chipTop = (from.y + to.y) / 2f + 12f
-                maxX = maxOf(maxX, chipLeft + RelationLabelWidthEstimatePt)
                 maxY = maxOf(maxY, chipTop + RelationLabelHeightEstimatePt)
+
+                val startX = from.x + fromWidth
+                val startY = from.y + tableHeight(from.columns.size) / 2f
+                val endX = to.x
+                val endY = to.y + tableHeight(to.columns.size) / 2f
+                val stubOutX = startX + ConnectorStubPt
+                val stubInX = endX - ConnectorStubPt
+                val controlOffset = maxOf(abs(stubInX - stubOutX) * 0.6f, abs(endY - startY) * 0.4f, ConnectorMinCurveOffsetPt)
+
+                maxX = maxOf(maxOf(maxX, chipLeft + RelationLabelWidthEstimatePt), maxOf(stubOutX + controlOffset, stubInX))
+                minX = minOf(minX, stubInX - controlOffset, stubOutX)
             }
 
             pageWidthPt = (maxX - minX) + PageMarginPt * 2
@@ -360,6 +420,16 @@ private fun tableAccentColor(tableColor: TableColor): Int = when (tableColor) {
 }
 
 /**
+ * Та же логика, что и в DiagramEditorScreen.kt (isManyAt там же): левая сторона короткой подписи
+ * связи ("1 – N") — про from, правая — про to.
+ */
+private fun RelationshipType.isManyAt(isFromEnd: Boolean): Boolean = when (this) {
+    RelationshipType.ONE_TO_ONE -> false
+    RelationshipType.ONE_TO_MANY -> !isFromEnd
+    RelationshipType.MANY_TO_MANY -> true
+}
+
+/**
  * Все Paint'ы экспорта — созданы один раз на export() и переиспользуются и для замера текста
  * (measureTableWidth), и для самой отрисовки: те же инстансы гарантируют, что раскладка не
  * разъедется с тем, что реально нарисовано.
@@ -386,8 +456,7 @@ private class PdfPaints {
     val cardBorder = strokePaint(ColorOutline, 1f)
     val divider = strokePaint(ColorOutline, 0.75f)
 
-    val connectorLine = strokePaint(ColorPrimary, 2f)
-    val connectorDot = fillPaint(ColorPrimary)
+    val connectorLine = strokePaint(ColorPrimary, 2f).apply { strokeCap = Paint.Cap.ROUND }
 
     val dot = fillPaint(ColorOutline)
 
@@ -421,7 +490,16 @@ private const val LabelCornerRadiusPt = 8f
 private const val RelationLabelWidthEstimatePt = 48f
 private const val RelationLabelHeightEstimatePt = 20f
 
-private const val ConnectorDotRadiusPt = 3.5f
+// Размер маркера кардинальности ("1"/"N" на конце связи) — те же числа, что MarkerReach/MarkerSpread
+// в DiagramEditorScreen.kt, чтобы отметка не разъезжалась между экраном и PDF.
+private const val MarkerReachPt = 11f
+private const val MarkerSpreadPt = 5f
+// Длина фиксированного горизонтального "хвостика" связи на выходе/входе — то же самое
+// ConnectorStubLength в DiagramEditorScreen.kt; должна быть заметно больше MarkerReachPt.
+private const val ConnectorStubPt = 20f
+// Нижняя граница смещения контрольных точек переходной кривой между хвостиками — то же самое
+// ConnectorMinCurveOffset в DiagramEditorScreen.kt.
+private const val ConnectorMinCurveOffsetPt = 24f
 private const val DotGridRadiusPt = 1.1f
 private const val MaxDotGridAreaPt2 = 6_000_000f
 

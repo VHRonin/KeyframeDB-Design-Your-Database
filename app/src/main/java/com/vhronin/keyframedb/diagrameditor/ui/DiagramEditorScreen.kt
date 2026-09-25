@@ -70,6 +70,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -100,6 +101,7 @@ import com.vhronin.keyframedb.theme.KeyframeDBExtendedTheme
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
 import java.io.File
+import kotlin.math.abs
 import kotlin.math.ceil
 
 // Ширина/высота таблиц выражены в "точках" сетки, а не в произвольных dp —
@@ -150,8 +152,8 @@ private fun TableColor.toComposeColor(): Color = when (this) {
 }
 
 private val MenuWidth = 168.dp
-// В меню три пункта: Редактировать / Переименовать / Связь.
-private val MenuHeightExpanded = 144.dp
+// В меню четыре пункта: Редактировать / Переименовать / Связь / Удалить.
+private val MenuHeightExpanded = 192.dp
 private val MenuMargin = 8.dp
 
 // Раньше это была единственная, фиксированная ширина карточки. Теперь это только нижняя
@@ -305,8 +307,6 @@ fun DiagramEditorScreen(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .padding(bottom = 12.dp)
             ) {
                 DiagramCanvas(
                     tables = uiState.tables,
@@ -327,6 +327,7 @@ fun DiagramEditorScreen(
                     onRenameTableClick = viewModel::onRenameTableClick,
                     onEditAttributesClick = viewModel::onEditAttributesClick,
                     onBuildRelationshipClick = viewModel::onBuildRelationshipClick,
+                    onDeleteTableClick = viewModel::onDeleteTable,
                     onLinkTableTap = viewModel::onLinkTableTap,
                     onCancelLinking = viewModel::onCancelLinking,
                     onRelationshipBadgeClick = viewModel::onRelationshipBadgeClick,
@@ -543,6 +544,7 @@ private fun DiagramCanvas(
     onRenameTableClick: (tableId: String) -> Unit,
     onEditAttributesClick: (tableId: String) -> Unit,
     onBuildRelationshipClick: (tableId: String) -> Unit,
+    onDeleteTableClick: (tableId: String) -> Unit,
     onLinkTableTap: (tableId: String) -> Unit,
     onCancelLinking: () -> Unit,
     onRelationshipBadgeClick: (relationshipId: String) -> Unit,
@@ -580,9 +582,6 @@ private fun DiagramCanvas(
 
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(MaterialTheme.colorScheme.background)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(20.dp))
             .onSizeChanged { onCanvasSizeChange(it) }
             .drawBehind { drawDotGrid(dotColor, scale, panOffset) }
             .pointerInput(Unit) {
@@ -687,7 +686,8 @@ private fun DiagramCanvas(
                     density = density,
                     onEditAttributesClick = { onEditAttributesClick(table.id) },
                     onRenameClick = { onRenameTableClick(table.id) },
-                    onBuildRelationClick = { onBuildRelationshipClick(table.id) }
+                    onBuildRelationClick = { onBuildRelationshipClick(table.id) },
+                    onDeleteClick = { onDeleteTableClick(table.id) }
                 )
             }
         }
@@ -762,7 +762,8 @@ private fun TableActionMenu(
     density: Density,
     onEditAttributesClick: () -> Unit,
     onRenameClick: () -> Unit,
-    onBuildRelationClick: () -> Unit
+    onBuildRelationClick: () -> Unit,
+    onDeleteClick: () -> Unit
 ) {
     val menuHeightPx = with(density) { MenuHeightExpanded.toPx() }
     val menuWidthPx = with(density) { MenuWidth.toPx() }
@@ -798,11 +799,18 @@ private fun TableActionMenu(
         MenuAction(icon = Icons.Default.DriveFileRenameOutline, label = "Переименовать", onClick = onRenameClick)
         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
         MenuAction(icon = Icons.Default.Link, label = "Связь", onClick = onBuildRelationClick)
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+        MenuAction(
+            icon = Icons.Default.Delete,
+            label = "Удалить",
+            onClick = onDeleteClick,
+            contentColor = MaterialTheme.colorScheme.error
+        )
     }
 }
 
 @Composable
-private fun MenuAction(icon: ImageVector, label: String, onClick: () -> Unit) {
+private fun MenuAction(icon: ImageVector, label: String, onClick: () -> Unit, contentColor: Color = MaterialTheme.colorScheme.primary) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -814,10 +822,10 @@ private fun MenuAction(icon: ImageVector, label: String, onClick: () -> Unit) {
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
+            tint = contentColor,
             modifier = Modifier.size(16.dp)
         )
-        Text(text = label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
+        Text(text = label, style = MaterialTheme.typography.bodySmall, color = contentColor)
     }
 }
 
@@ -847,6 +855,61 @@ private fun DrawScope.drawDotGrid(color: Color, scale: Float, panOffset: Offset)
 
 private fun Float.safeMod(step: Float): Float = ((this % step) + step) % step
 
+// Насколько "хвост" маркера кардинальности уходит вдоль линии связи от края таблицы и насколько
+// расходятся его ножки — те же числа продублированы в PdfDiagramExporter (drawCardinalityMarker
+// там же), чтобы отметки "1"/"N" на связи не разъезжались между экраном и PDF-экспортом.
+private val MarkerReach = 11.dp
+private val MarkerSpread = 5.dp
+
+// Длина фиксированного горизонтального "хвостика" на выходе/входе связи — должна быть заметно
+// больше MarkerReach, чтобы маркер целиком поместился на прямом участке (см. ConnectorLines).
+private val ConnectorStubLength = 20.dp
+
+// Нижняя граница смещения контрольных точек переходной кривой между хвостиками (см. controlOffset
+// в ConnectorLines) — чтобы кривая не сгибалась резко, даже если оба хвостика оказались рядом
+// и по X, и по Y.
+private val ConnectorMinCurveOffset = 24.dp
+
+/**
+ * Чья сторона связи — "один" или "много", по типу связи и тому, это конец "from" или "to".
+ * Читаем так же, как читается сама подпись связи (RelationshipType.shortLabel, "1 – N" —
+ * первый символ про from, второй про to) и заголовок RelationshipSheet ("$fromTableName →
+ * $toTableName") — левая сторона всегда про from, правая про to.
+ */
+private fun RelationshipType.isManyAt(isFromEnd: Boolean): Boolean = when (this) {
+    RelationshipType.ONE_TO_ONE -> false
+    RelationshipType.ONE_TO_MANY -> !isFromEnd
+    RelationshipType.MANY_TO_MANY -> true
+}
+
+/**
+ * ER-нотация "вороньей лапки" на конце линии связи: одна короткая перпендикулярная чёрточка —
+ * кардинальность "один", раздвоенные ножки — "много" (третья, прямая "ножка" — сама линия связи,
+ * отдельно её рисовать не нужно).
+ *
+ * `outward` здесь всегда СТРОГО горизонтален (см. ConnectorStubLength в ConnectorLines) — связь
+ * специально построена так, что первые ConnectorStubLength от каждой таблицы идут прямо и
+ * горизонтально, что бы ни было на другом конце. Раньше маркер ориентировался по касательной
+ * кривой, которая тянется к цели — и если цель оказывалась близко по X, но далеко по Y (или вовсе
+ * левее источника), кривая почти сразу уходила в сторону, и маркер либо повисал в стороне от
+ * линии, либо уезжал так далеко, что казалось, будто его нет вовсе. Фиксированный прямой участок
+ * у каждого конца убирает эту проблему полностью — маркер гарантированно виден при любом
+ * взаимном расположении таблиц.
+ */
+private fun DrawScope.drawCardinalityMarker(point: Offset, outward: Offset, isMany: Boolean, color: Color, strokeWidthPx: Float) {
+    val reachPx = MarkerReach.toPx()
+    val spreadPx = MarkerSpread.toPx()
+    val perp = Offset(-outward.y, outward.x)
+    if (isMany) {
+        val back = point + outward * reachPx
+        drawLine(color, back - perp * spreadPx, point, strokeWidth = strokeWidthPx, cap = StrokeCap.Round)
+        drawLine(color, back + perp * spreadPx, point, strokeWidth = strokeWidthPx, cap = StrokeCap.Round)
+    } else {
+        val tickCenter = point + outward * (reachPx * 0.65f)
+        drawLine(color, tickCenter - perp * spreadPx, tickCenter + perp * spreadPx, strokeWidth = strokeWidthPx, cap = StrokeCap.Round)
+    }
+}
+
 @Composable
 private fun ConnectorLines(
     tables: List<TableEntity>,
@@ -859,6 +922,8 @@ private fun ConnectorLines(
     val tablesById = tables.associateBy { it.id }
 
     Canvas(modifier = Modifier.fillMaxSize()) {
+        val strokeWidthPx = 2.dp.toPx()
+        val stubLenPx = ConnectorStubLength.toPx()
         relationships.forEach { relationship ->
             val from = tablesById[relationship.fromTableId] ?: return@forEach
             val to = tablesById[relationship.toTableId] ?: return@forEach
@@ -877,18 +942,45 @@ private fun ConnectorLines(
                 )
             }
 
-            val controlOffsetX = (end.x - start.x) * 0.6f
+            // Фиксированный горизонтальный "хвостик" на выходе из from и на входе в to — независимо
+            // от того, где на самом деле стоит вторая таблица (даже если она левее первой или сильно
+            // смещена по Y). Между концами хвостиков — плавная S-кривая к цели.
+            val stubOut = Offset(start.x + stubLenPx, start.y)
+            val stubIn = Offset(end.x - stubLenPx, end.y)
+
+            // Смещение контрольных точек считаем от БОЛЬШЕГО из dx/dy между хвостиками, а не только
+            // от dx: если таблицы стоят близко по X, но далеко по Y, dx между хвостиками может
+            // оказаться совсем маленьким (или даже отрицательным) — и кривая, опираясь только на
+            // него, сгибалась почти в одной точке резким изломом вместо плавного разворота вниз.
+            // Учитывая и dy, кривая всегда получает достаточный "разбег" перед поворотом к цели.
+            val dx = stubIn.x - stubOut.x
+            val dy = stubIn.y - stubOut.y
+            val controlOffset = maxOf(abs(dx) * 0.6f, abs(dy) * 0.4f, ConnectorMinCurveOffset.toPx())
+            val midControl1 = Offset(stubOut.x + controlOffset, stubOut.y)
+            val midControl2 = Offset(stubIn.x - controlOffset, stubIn.y)
+
             val path = Path().apply {
                 moveTo(start.x, start.y)
-                cubicTo(
-                    start.x + controlOffsetX, start.y,
-                    end.x - controlOffsetX, end.y,
-                    end.x, end.y
-                )
+                lineTo(stubOut.x, stubOut.y)
+                cubicTo(midControl1.x, midControl1.y, midControl2.x, midControl2.y, stubIn.x, stubIn.y)
+                lineTo(end.x, end.y)
             }
-            drawPath(path = path, color = lineColor, style = Stroke(width = 2.dp.toPx()))
-            drawCircle(color = lineColor, radius = 3.5.dp.toPx(), center = start)
-            drawCircle(color = lineColor, radius = 3.5.dp.toPx(), center = end)
+            drawPath(path = path, color = lineColor, style = Stroke(width = strokeWidthPx))
+
+            drawCardinalityMarker(
+                point = start,
+                outward = Offset(1f, 0f),
+                isMany = relationship.type.isManyAt(isFromEnd = true),
+                color = lineColor,
+                strokeWidthPx = strokeWidthPx
+            )
+            drawCardinalityMarker(
+                point = end,
+                outward = Offset(-1f, 0f),
+                isMany = relationship.type.isManyAt(isFromEnd = false),
+                color = lineColor,
+                strokeWidthPx = strokeWidthPx
+            )
         }
     }
 
