@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -63,6 +64,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
@@ -163,6 +165,16 @@ private val TableCardMinWidth = DotGridStep * TableWidthDots
 
 private fun tableHeight(columnCount: Int): Dp =
     DotGridStep * (TableHeaderDots + TableRowDots * columnCount)
+
+/**
+ * Y-смещение центра строки атрибута с данным индексом (0-based) от верхнего края карточки —
+ * связи теперь идут не в геометрический центр таблицы, а в конкретную строку атрибута
+ * (см. ConnectorLines). tableHeight(columnIndex) — это как раз высота заголовка плюс всех
+ * строк ДО этой, т.е. Y её верхнего края; прибавляем половину высоты строки, чтобы попасть
+ * в её середину — та же логика, что и раньше была для середины всей карточки.
+ */
+private fun columnCenterOffsetY(columnIndex: Int): Dp =
+    tableHeight(columnIndex) + DotGridStep * TableRowDots / 2
 
 // ---- Адаптивная ширина карточки таблицы ----
 //
@@ -286,6 +298,8 @@ fun DiagramEditorScreen(
         }
     }
 
+    BackHandler(onBack = viewModel::onBackClick)
+
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
         Column(
             modifier = Modifier
@@ -328,7 +342,7 @@ fun DiagramEditorScreen(
                     onEditAttributesClick = viewModel::onEditAttributesClick,
                     onBuildRelationshipClick = viewModel::onBuildRelationshipClick,
                     onDeleteTableClick = viewModel::onDeleteTable,
-                    onLinkTableTap = viewModel::onLinkTableTap,
+                    onLinkColumnTap = viewModel::onLinkColumnTap,
                     onCancelLinking = viewModel::onCancelLinking,
                     onRelationshipBadgeClick = viewModel::onRelationshipBadgeClick,
                     onAddColumnClick = viewModel::onAddColumnClick,
@@ -400,11 +414,15 @@ fun DiagramEditorScreen(
 
     val pending = uiState.pendingRelationship
     val pendingFromTable = uiState.tables.find { it.id == pending?.fromTableId }
+    val pendingFromColumn = pendingFromTable?.columns?.find { it.id == pending?.fromColumnId }
     val pendingToTable = uiState.tables.find { it.id == pending?.toTableId }
-    if (pending != null && pendingFromTable != null && pendingToTable != null) {
+    val pendingToColumn = pendingToTable?.columns?.find { it.id == pending?.toColumnId }
+    if (pending != null && pendingFromTable != null && pendingFromColumn != null &&
+        pendingToTable != null && pendingToColumn != null
+    ) {
         RelationshipSheet(
-            fromTableName = pendingFromTable.name,
-            toTableName = pendingToTable.name,
+            fromLabel = attributeLabel(pendingFromTable.name, pendingFromColumn.name),
+            toLabel = attributeLabel(pendingToTable.name, pendingToColumn.name),
             type = pending.type,
             isNew = true,
             onTypeChange = viewModel::onPendingRelationshipTypeChanged,
@@ -415,11 +433,15 @@ fun DiagramEditorScreen(
 
     val editingRelationship = uiState.relationships.find { it.id == uiState.editingRelationshipId }
     val editingRelFromTable = uiState.tables.find { it.id == editingRelationship?.fromTableId }
+    val editingRelFromColumn = editingRelFromTable?.columns?.find { it.id == editingRelationship?.fromColumnId }
     val editingRelToTable = uiState.tables.find { it.id == editingRelationship?.toTableId }
-    if (editingRelationship != null && editingRelFromTable != null && editingRelToTable != null) {
+    val editingRelToColumn = editingRelToTable?.columns?.find { it.id == editingRelationship?.toColumnId }
+    if (editingRelationship != null && editingRelFromTable != null && editingRelFromColumn != null &&
+        editingRelToTable != null && editingRelToColumn != null
+    ) {
         RelationshipSheet(
-            fromTableName = editingRelFromTable.name,
-            toTableName = editingRelToTable.name,
+            fromLabel = attributeLabel(editingRelFromTable.name, editingRelFromColumn.name),
+            toLabel = attributeLabel(editingRelToTable.name, editingRelToColumn.name),
             type = editingRelationship.type,
             isNew = false,
             onTypeChange = viewModel::onEditingRelationshipTypeChanged,
@@ -545,7 +567,7 @@ private fun DiagramCanvas(
     onEditAttributesClick: (tableId: String) -> Unit,
     onBuildRelationshipClick: (tableId: String) -> Unit,
     onDeleteTableClick: (tableId: String) -> Unit,
-    onLinkTableTap: (tableId: String) -> Unit,
+    onLinkColumnTap: (tableId: String, columnId: String) -> Unit,
     onCancelLinking: () -> Unit,
     onRelationshipBadgeClick: (relationshipId: String) -> Unit,
     onAddColumnClick: (tableId: String) -> Unit,
@@ -620,10 +642,20 @@ private fun DiagramCanvas(
                 onRelationshipClick = if (isLinking) null else onRelationshipBadgeClick
             )
 
-            // Пока идёт связывание, тап по любой таблице выбирает первую/вторую точку связи,
-            // а перетаскивание временно выключаем — чтобы случайный сдвиг пальца не сбивал режим.
+            // Пока идёт связывание, тап по СТРОКЕ АТРИБУТА (а не по таблице целиком) выбирает
+            // первую/вторую точку связи, а перетаскивание временно выключаем — чтобы случайный
+            // сдвиг пальца не сбивал режим. Пока источник ещё не выбран целиком и таблица-
+            // источник уже известна заранее (запуск из меню конкретной таблицы, см.
+            // onBuildRelationshipClick), тапабельны атрибуты только внутри неё — остальные
+            // таблицы на этом шаге визуально притушены (см. isLinkableForColumnTap ниже).
+            val isChoosingSource = isLinking && linkingState?.fromColumnId == null
             tables.forEach { table ->
                 key(table.id) {
+                    val isLinkableForColumnTap = when {
+                        !isLinking -> false
+                        isChoosingSource -> linkingState?.fromTableId == null || linkingState.fromTableId == table.id
+                        else -> true
+                    }
                     TableCard(
                         table = table,
                         width = tableWidths[table.id] ?: TableCardMinWidth,
@@ -632,9 +664,10 @@ private fun DiagramCanvas(
                         isDragging = draggingTableId == table.id,
                         isEditingAttributes = attributeEditingTableId == table.id,
                         isLinkSource = linkingState?.fromTableId == table.id,
-                        onTap = {
-                            if (isLinking) onLinkTableTap(table.id) else onTableSelected(table.id)
-                        },
+                        isLinking = isLinking,
+                        isLinkableForColumnTap = isLinkableForColumnTap,
+                        linkingSourceColumnId = if (linkingState?.fromTableId == table.id) linkingState.fromColumnId else null,
+                        onTap = { if (!isLinking) onTableSelected(table.id) },
                         onDrag = { dx, dy -> if (!isLinking) onTableDrag(table.id, dx, dy) },
                         onDragStart = {
                             if (!isLinking) {
@@ -650,6 +683,7 @@ private fun DiagramCanvas(
                         onDragCancel = { if (!isLinking) draggingTableId = null },
                         onDeleteColumn = { columnId -> onDeleteColumn(table.id, columnId) },
                         onColumnClick = { columnId -> onColumnClick(table.id, columnId) },
+                        onColumnLinkTap = { columnId -> onLinkColumnTap(table.id, columnId) },
                         onAddColumnClick = { onAddColumnClick(table.id) }
                     )
                 }
@@ -699,20 +733,30 @@ private fun DiagramCanvas(
             lastLinkingState = linkingState
         }
         val linkingSourceTable = tables.find { it.id == lastLinkingState?.fromTableId }
+        val linkingSourceColumn = linkingSourceTable?.columns?.find { it.id == lastLinkingState?.fromColumnId }
         AnimatedVisibility(
             visible = linkingState != null,
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
             enter = fadeIn(tween(140)),
             exit = fadeOut(tween(110))
         ) {
-            LinkingModeBanner(sourceTableName = linkingSourceTable?.name, onCancel = onCancelLinking)
+            LinkingModeBanner(
+                sourceTableName = linkingSourceTable?.name,
+                sourceColumnName = linkingSourceColumn?.name,
+                onCancel = onCancelLinking
+            )
         }
     }
 }
 
-/** Баннер поверх холста на время выбора таблиц для связи (см. onBuildRelationshipClick/onAddRelationClick). */
+/**
+ * Баннер поверх холста на время выбора АТРИБУТОВ для связи (см.
+ * onBuildRelationshipClick/onAddRelationClick). sourceColumnName приходит только после того,
+ * как источник выбран целиком — пока задана лишь таблица (запуск из её меню), но конкретный
+ * атрибут внутри неё ещё не тапнули, он остаётся null.
+ */
 @Composable
-private fun LinkingModeBanner(sourceTableName: String?, onCancel: () -> Unit) {
+private fun LinkingModeBanner(sourceTableName: String?, sourceColumnName: String?, onCancel: () -> Unit) {
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(percent = 50))
@@ -729,10 +773,11 @@ private fun LinkingModeBanner(sourceTableName: String?, onCancel: () -> Unit) {
             modifier = Modifier.size(16.dp)
         )
         Text(
-            text = if (sourceTableName == null) {
-                "Выберите первую таблицу для связи"
-            } else {
-                "Выберите таблицу для связи с «$sourceTableName»"
+            text = when {
+                sourceColumnName != null ->
+                    "Выберите атрибут для связи с «${attributeLabel(sourceTableName.orEmpty(), sourceColumnName)}»"
+                sourceTableName != null -> "Выберите атрибут в «$sourceTableName» для связи"
+                else -> "Выберите атрибут-источник для связи"
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface
@@ -873,8 +918,8 @@ private val ConnectorMinCurveOffset = 24.dp
 /**
  * Чья сторона связи — "один" или "много", по типу связи и тому, это конец "from" или "to".
  * Читаем так же, как читается сама подпись связи (RelationshipType.shortLabel, "1 – N" —
- * первый символ про from, второй про to) и заголовок RelationshipSheet ("$fromTableName →
- * $toTableName") — левая сторона всегда про from, правая про to.
+ * первый символ про from, второй про to) и заголовок RelationshipSheet ("$fromLabel →
+ * $toLabel") — левая сторона всегда про from, правая про to.
  */
 private fun RelationshipType.isManyAt(isFromEnd: Boolean): Boolean = when (this) {
     RelationshipType.ONE_TO_ONE -> false
@@ -927,18 +972,25 @@ private fun ConnectorLines(
         relationships.forEach { relationship ->
             val from = tablesById[relationship.fromTableId] ?: return@forEach
             val to = tablesById[relationship.toTableId] ?: return@forEach
+            // Индекс конкретного атрибута внутри карточки — если его больше нет (удалили
+            // атрибут ещё до того, как каскадное удаление связи в ViewModel её убрало,
+            // например при отмене отдельной сериализованной правки), тихо пропускаем связь,
+            // как и раньше пропускали связи на несуществующие таблицы.
+            val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
+            val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
+            if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
             val fromWidth = tableWidths[from.id] ?: TableCardMinWidth
 
             val start = with(density) {
                 Offset(
                     x = (from.x.dp + fromWidth).toPx(),
-                    y = (from.y.dp + tableHeight(from.columns.size) / 2).toPx()
+                    y = (from.y.dp + columnCenterOffsetY(fromColumnIndex)).toPx()
                 )
             }
             val end = with(density) {
                 Offset(
                     x = to.x.dp.toPx(),
-                    y = (to.y.dp + tableHeight(to.columns.size) / 2).toPx()
+                    y = (to.y.dp + columnCenterOffsetY(toColumnIndex)).toPx()
                 )
             }
 
@@ -991,9 +1043,13 @@ private fun ConnectorLines(
     relationships.forEach { relationship ->
         val from = tablesById[relationship.fromTableId] ?: return@forEach
         val to = tablesById[relationship.toTableId] ?: return@forEach
+        val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
+        val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
+        if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
         val fromWidth = tableWidths[from.id] ?: TableCardMinWidth
         val midX = (from.x + fromWidth.value + to.x) / 2f
-        val midY = (from.y + to.y) / 2f + 12f
+        val midY = (from.y + columnCenterOffsetY(fromColumnIndex).value +
+                to.y + columnCenterOffsetY(toColumnIndex).value) / 2f + 12f
         RelationLabel(
             text = relationship.type.shortLabel,
             onClick = onRelationshipClick?.let { onClick -> { onClick(relationship.id) } },
@@ -1026,6 +1082,16 @@ private fun TableCard(
     isDragging: Boolean,
     isEditingAttributes: Boolean,
     isLinkSource: Boolean,
+    // Идёт ли вообще режим связывания сейчас (не обязательно с источником внутри ЭТОЙ таблицы) —
+    // от него зависит, тапабельны ли атрибуты карточки.
+    isLinking: Boolean,
+    // Тапабельны ли атрибуты именно этой таблицы прямо сейчас. Ложно только на шаге выбора
+    // источника, когда он запущен из меню конкретной, ДРУГОЙ таблицы (см. isChoosingSource
+    // в DiagramCanvas) — тогда карточка притушена и её атрибуты не реагируют на тап.
+    isLinkableForColumnTap: Boolean,
+    // Атрибут-источник связи, если он лежит именно в этой таблице — подсвечиваем его строку
+    // отдельно от остальных, чтобы было видно, что уже выбрано.
+    linkingSourceColumnId: String?,
     onTap: () -> Unit,
     onDrag: (dx: Float, dy: Float) -> Unit,
     onDragStart: () -> Unit,
@@ -1033,6 +1099,7 @@ private fun TableCard(
     onDragCancel: () -> Unit,
     onDeleteColumn: (columnId: String) -> Unit,
     onColumnClick: (columnId: String) -> Unit,
+    onColumnLinkTap: (columnId: String) -> Unit,
     onAddColumnClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1042,6 +1109,14 @@ private fun TableCard(
     // пользователь явно включил его кнопкой "Редактировать" в плавающем меню —
     // не просто по факту выделения таблицы, и не во время перетаскивания.
     val showEditAffordances = isEditingAttributes && !isDragging
+    // Строки атрибутов реагируют на тап для связывания только пока идёт само связывание,
+    // эта таблица сейчас разрешена для выбора (см. isLinkableForColumnTap выше) и режим
+    // редактирования атрибутов не включён параллельно — тогда приоритет остаётся за ним
+    // (та же логика приоритета, что и раньше была у тапа по всей карточке).
+    val allowColumnLinkTaps = isLinking && isLinkableForColumnTap && !showEditAffordances
+    // Пока идёт связывание и эта таблица сейчас не выбираема (см. isLinkableForColumnTap) —
+    // притушиваем всю карточку, чтобы сразу было видно, где сейчас можно тапнуть по атрибуту.
+    val cardAlpha = if (isLinking && !isLinkableForColumnTap && !showEditAffordances) 0.45f else 1f
 
     // pointerInput ниже с ключом table.id живёт, пока карточка на экране, и не перезапускается
     // при каждой рекомпозиции — поэтому обычные лямбда-параметры внутри него могут "протухнуть"
@@ -1053,7 +1128,11 @@ private fun TableCard(
     val currentOnDragEnd by rememberUpdatedState(onDragEnd)
     val currentOnDragCancel by rememberUpdatedState(onDragCancel)
 
-    Column(modifier = modifier.offset(x = table.x.dp, y = table.y.dp)) {
+    Column(
+        modifier = modifier
+            .offset(x = table.x.dp, y = table.y.dp)
+            .alpha(cardAlpha)
+    ) {
         Column(
             modifier = Modifier
                 .width(width)
@@ -1117,7 +1196,11 @@ private fun TableCard(
                     FieldRow(
                         column = column,
                         isEditable = showEditAffordances,
-                        onClick = { onColumnClick(column.id) },
+                        isLinkable = allowColumnLinkTaps,
+                        isLinkSource = linkingSourceColumnId == column.id,
+                        onClick = {
+                            if (showEditAffordances) onColumnClick(column.id) else onColumnLinkTap(column.id)
+                        },
                         onDelete = { onDeleteColumn(column.id) }
                     )
                 }
@@ -1157,13 +1240,26 @@ private fun AddColumnButton(onClick: () -> Unit, modifier: Modifier = Modifier) 
 private fun FieldRow(
     column: TableColumn,
     isEditable: Boolean,
+    // Тапабельна ли строка для выбора атрибута в режиме связывания — независимо от isEditable,
+    // который отвечает за режим редактирования атрибутов (кнопка "Редактировать" в меню).
+    isLinkable: Boolean,
+    // Этот атрибут уже выбран источником текущей создаваемой связи — подсвечиваем строку,
+    // чтобы было видно, что именно от него сейчас тянется связь.
+    isLinkSource: Boolean,
     onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .then(if (isEditable) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(
+                if (isLinkSource) {
+                    Modifier.background(KeyframeDBExtendedTheme.colors.accent2Soft)
+                } else {
+                    Modifier
+                }
+            )
+            .then(if (isEditable || isLinkable) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -1561,16 +1657,22 @@ private fun EditColumnSheet(
     }
 }
 
+/** Короткая подпись конкретного атрибута для шапки RelationshipSheet — "таблица.атрибут". */
+private fun attributeLabel(tableName: String, columnName: String): String =
+    "$tableName.${columnName.ifBlank { "…" }}"
+
 /**
  * Один BottomSheet на оба случая: создание новой связи (isNew = true, снизу кнопка "Создать
  * связь", закрытие без подтверждения просто отменяет её) и редактирование уже существующей
  * (isNew = false, вид связи меняется сразу по тапу на чип, снизу — кнопка удаления).
+ * fromLabel/toLabel — уже готовые подписи конкретных атрибутов ("таблица.атрибут"), а не
+ * просто имена таблиц: связь теперь строится между атрибутами, а не таблицами целиком.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RelationshipSheet(
-    fromTableName: String,
-    toTableName: String,
+    fromLabel: String,
+    toLabel: String,
     type: RelationshipType,
     isNew: Boolean,
     onTypeChange: (RelationshipType) -> Unit,
@@ -1594,7 +1696,7 @@ private fun RelationshipSheet(
             SheetHeader(
                 icon = Icons.Default.Link,
                 title = if (isNew) "Новая связь" else "Связь",
-                subtitle = "$fromTableName → $toTableName"
+                subtitle = "$fromLabel → $toLabel"
             )
 
             Spacer(Modifier.height(18.dp))

@@ -32,17 +32,26 @@ import kotlin.math.roundToInt
 data class EditingColumnRef(val tableId: String, val columnId: String)
 
 /**
- * Режим выбора таблиц для новой связи.
- * fromTableId == null, пока не выбрали первую таблицу (запуск с кнопки на тулбаре, без
- * заранее известного источника) — как только выбрали, дальше ждём тап по второй таблице
- * (запуск из меню конкретной таблицы сразу приходит с уже известным fromTableId).
+ * Режим выбора АТРИБУТОВ для новой связи (не таблиц целиком — тап по строке конкретного
+ * атрибута сразу даёт и id таблицы, и id атрибута внутри неё).
+ *
+ * fromTableId == null, пока не выбрали первый атрибут вообще (запуск с кнопки на тулбаре,
+ * без заранее известного источника) — тогда засчитывается тап по строке атрибута в любой
+ * таблице. Если fromTableId уже известен (запуск из меню конкретной таблицы, см.
+ * onBuildRelationshipClick), а fromColumnId ещё null — источник как таблица уже выбран,
+ * но тапнуть нужно именно по строке атрибута внутри неё, тапы по чужим таблицам на этом
+ * шаге игнорируются (см. onLinkColumnTap). Как только оба поля заполнены — источник выбран
+ * целиком, и следующий тап по строке атрибута (в любой таблице, включая ту же самую —
+ * см. комментарий в onLinkColumnTap про самоссылающиеся связи) задаёт цель связи.
  */
-data class LinkingState(val fromTableId: String? = null)
+data class LinkingState(val fromTableId: String? = null, val fromColumnId: String? = null)
 
-/** Обе таблицы для новой связи уже выбраны — осталось подтвердить вид связи в BottomSheet. */
+/** Оба атрибута для новой связи уже выбраны — осталось подтвердить вид связи в BottomSheet. */
 data class PendingRelationship(
     val fromTableId: String,
+    val fromColumnId: String,
     val toTableId: String,
+    val toColumnId: String,
     val type: RelationshipType = RelationshipType.ONE_TO_MANY
 )
 
@@ -387,25 +396,45 @@ class DiagramEditorViewModel(
     }
 
     /**
-     * Тап по таблице во время режима связывания.
-     * Если первую таблицу ещё не выбрали (запуск с тулбара) — запоминаем её и ждём вторую.
-     * Тап по той же таблице, с которой начали — отмена. Тап по другой — обе таблицы выбраны,
-     * открываем BottomSheet подтверждения вида связи (см. PendingRelationship).
+     * Тап по строке конкретного атрибута во время режима связывания — приходит сразу с id
+     * его таблицы и id самого атрибута (в отличие от старого связывания по таблицам целиком,
+     * здесь ровно этой пары достаточно, чтобы однозначно задать точку связи).
+     *
+     * Если источник ещё не выбран целиком (fromColumnId == null): когда таблица-источник уже
+     * была зафиксирована заранее (запуск из меню конкретной таблицы — fromTableId != null),
+     * тап засчитывается только по строке внутри НЕЁ — тап по чужой таблице на этом шаге
+     * молча игнорируется, чтобы случайный тап не подменил уже явно выбранный источник.
+     *
+     * Если источник уже выбран целиком, тап по ТОЙ ЖЕ строке — отмена (тот же жест "тапнуть
+     * по источнику ещё раз", что раньше был на уровне целой таблицы). Тап по любой ДРУГОЙ
+     * строке, в том числе в той же самой таблице — источник и цель выбраны, открываем
+     * BottomSheet подтверждения вида связи. Разрешать цель в той же таблице, что и источник, —
+     * осознанное расширение по сравнению со старым связыванием таблиц целиком: атрибут может
+     * ссылаться на другой атрибут своей же таблицы (например, self-relation вроде
+     * `employee.manager_id -> employee.id`), а раньше такая связь была в принципе невозможна.
      */
-    fun onLinkTableTap(tableId: String) {
+    fun onLinkColumnTap(tableId: String, columnId: String) {
         val linking = _uiState.value.linkingState ?: return
-        val fromTableId = linking.fromTableId
-        if (fromTableId == null) {
-            _uiState.value = _uiState.value.copy(linkingState = linking.copy(fromTableId = tableId))
+        val knownFromTableId = linking.fromTableId
+        if (linking.fromColumnId == null) {
+            if (knownFromTableId != null && tableId != knownFromTableId) return
+            _uiState.value = _uiState.value.copy(
+                linkingState = linking.copy(fromTableId = tableId, fromColumnId = columnId)
+            )
             return
         }
-        if (tableId == fromTableId) {
+        if (tableId == knownFromTableId && columnId == linking.fromColumnId) {
             onCancelLinking()
             return
         }
         _uiState.value = _uiState.value.copy(
             linkingState = null,
-            pendingRelationship = PendingRelationship(fromTableId = fromTableId, toTableId = tableId)
+            pendingRelationship = PendingRelationship(
+                fromTableId = knownFromTableId!!,
+                fromColumnId = linking.fromColumnId,
+                toTableId = tableId,
+                toColumnId = columnId
+            )
         )
     }
 
@@ -420,18 +449,26 @@ class DiagramEditorViewModel(
         _uiState.value = _uiState.value.copy(pendingRelationship = pending.copy(type = type))
     }
 
-    /** Кнопка "Создать связь" в BottomSheet — сохраняем связь, если такой ещё нет. */
+    /**
+     * Кнопка "Создать связь" в BottomSheet — сохраняем связь, если такой ещё нет.
+     * Дубликат теперь проверяем по паре конкретных атрибутов, а не паре таблиц: в отличие
+     * от старого связывания таблиц целиком, между одной и той же парой таблиц теперь вполне
+     * может быть несколько связей через разные атрибуты (например, составной внешний ключ
+     * из двух отдельных полей) — такие больше не считаются дубликатами друг друга.
+     */
     fun onConfirmPendingRelationship() {
         val pending = _uiState.value.pendingRelationship ?: return
         val alreadyLinked = _uiState.value.relationships.any {
-            it.fromTableId == pending.fromTableId && it.toTableId == pending.toTableId
+            it.fromColumnId == pending.fromColumnId && it.toColumnId == pending.toColumnId
         }
         if (!alreadyLinked) {
             pushUndoSnapshot()
             val newRelationship = Relationship(
                 id = UUID.randomUUID().toString(),
                 fromTableId = pending.fromTableId,
+                fromColumnId = pending.fromColumnId,
                 toTableId = pending.toTableId,
+                toColumnId = pending.toColumnId,
                 type = pending.type
             )
             _uiState.value = _uiState.value.copy(relationships = _uiState.value.relationships + newRelationship)
@@ -495,8 +532,25 @@ class DiagramEditorViewModel(
         lastCoalesceKey = null
     }
 
+    /**
+     * Удаление атрибута теперь каскадно чистит и связи, которые опирались именно на него —
+     * связь строится между конкретными атрибутами, так что иначе она осталась бы висеть на
+     * несуществующий columnId (та же идея, что и в onDeleteTable для целой таблицы). Поэтому,
+     * в отличие от большинства других правок таблицы, здесь нельзя обойтись общей updateTable —
+     * нужно одним снимком поменять и tables, и relationships.
+     */
     fun onDeleteColumn(tableId: String, columnId: String) {
-        updateTable(tableId) { table -> table.copy(columns = table.columns.filterNot { it.id == columnId }) }
+        pushUndoSnapshot()
+        val state = _uiState.value
+        _uiState.value = state.copy(
+            tables = state.tables.map { table ->
+                if (table.id == tableId) table.copy(columns = table.columns.filterNot { it.id == columnId }) else table
+            },
+            relationships = state.relationships.filterNot {
+                (it.fromTableId == tableId && it.fromColumnId == columnId) ||
+                        (it.toTableId == tableId && it.toColumnId == columnId)
+            }
+        )
     }
 
     fun onColumnNameChanged(tableId: String, columnId: String, newName: String) {

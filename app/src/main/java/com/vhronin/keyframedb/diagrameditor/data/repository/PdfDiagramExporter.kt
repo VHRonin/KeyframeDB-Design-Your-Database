@@ -124,10 +124,13 @@ class PdfDiagramExporter(
         diagram.relationships.forEach { relationship ->
             val from = tablesById[relationship.fromTableId] ?: return@forEach
             val to = tablesById[relationship.toTableId] ?: return@forEach
+            val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
+            val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
+            if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
             val fromWidth = layout.widthOf(from)
 
-            val start = Pt(from.x + fromWidth, from.y + tableHeight(from.columns.size) / 2f)
-            val end = Pt(to.x, to.y + tableHeight(to.columns.size) / 2f)
+            val start = Pt(from.x + fromWidth, from.y + columnCenterOffsetY(fromColumnIndex))
+            val end = Pt(to.x, to.y + columnCenterOffsetY(toColumnIndex))
 
             // Фиксированный горизонтальный "хвостик" на выходе из from и на входе в to — та же
             // логика, что и в ConnectorLines в DiagramEditorScreen.kt (см. комментарий у
@@ -185,10 +188,14 @@ class PdfDiagramExporter(
         diagram.relationships.forEach { relationship ->
             val from = tablesById[relationship.fromTableId] ?: return@forEach
             val to = tablesById[relationship.toTableId] ?: return@forEach
+            val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
+            val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
+            if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
             val fromWidth = layout.widthOf(from)
 
             val chipLeft = (from.x + fromWidth + to.x) / 2f
-            val chipTop = (from.y + to.y) / 2f + 12f
+            val chipTop = (from.y + columnCenterOffsetY(fromColumnIndex) +
+                    to.y + columnCenterOffsetY(toColumnIndex)) / 2f + 12f
 
             val text = relationship.type.shortLabel
             val fm = paints.relationLabel.fontMetrics
@@ -308,6 +315,13 @@ private data class Pt(val x: Float, val y: Float) {
 private fun tableHeight(columnCount: Int): Float = GridStepPt * (TableHeaderDots + TableRowDots * columnCount)
 
 /**
+ * См. columnCenterOffsetY(columnIndex) в DiagramEditorScreen.kt — та же формула: связи и их
+ * подписи теперь идут в конкретную строку атрибута, а не в геометрический центр карточки.
+ */
+private fun columnCenterOffsetY(columnIndex: Int): Float =
+    tableHeight(columnIndex) + TableRowDots * GridStepPt / 2f
+
+/**
  * Ширина карточки под содержимое таблицы — повторяет computeTableCardWidth в
  * DiagramEditorScreen.kt (тот же пол в TableCardMinWidthPt, то же округление вверх до шага
  * сетки), но меряет текст через android.graphics.Paint вместо Compose TextMeasurer, раз PDF
@@ -365,15 +379,19 @@ private class PdfDiagramLayout(diagram: Diagram, paints: PdfPaints) {
             diagram.relationships.forEach { relationship ->
                 val from = tablesById[relationship.fromTableId] ?: return@forEach
                 val to = tablesById[relationship.toTableId] ?: return@forEach
+                val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
+                val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
+                if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
                 val fromWidth = widths[from.id] ?: TableCardMinWidthPt
                 val chipLeft = (from.x + fromWidth + to.x) / 2f
-                val chipTop = (from.y + to.y) / 2f + 12f
+                val chipTop = (from.y + columnCenterOffsetY(fromColumnIndex) +
+                        to.y + columnCenterOffsetY(toColumnIndex)) / 2f + 12f
                 maxY = maxOf(maxY, chipTop + RelationLabelHeightEstimatePt)
 
                 val startX = from.x + fromWidth
-                val startY = from.y + tableHeight(from.columns.size) / 2f
+                val startY = from.y + columnCenterOffsetY(fromColumnIndex)
                 val endX = to.x
-                val endY = to.y + tableHeight(to.columns.size) / 2f
+                val endY = to.y + columnCenterOffsetY(toColumnIndex)
                 val stubOutX = startX + ConnectorStubPt
                 val stubInX = endX - ConnectorStubPt
                 val controlOffset = maxOf(abs(stubInX - stubOutX) * 0.6f, abs(endY - startY) * 0.4f, ConnectorMinCurveOffsetPt)
