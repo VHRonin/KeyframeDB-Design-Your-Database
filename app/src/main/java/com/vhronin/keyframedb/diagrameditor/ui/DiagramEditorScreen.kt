@@ -298,6 +298,13 @@ fun DiagramEditorScreen(
         }
     }
 
+    // Системный жест/кнопка "Назад" раньше обходили viewModel.onBackClick() стороной — NavHost
+    // всплывал по умолчанию сразу, не дожидаясь, пока ViewModel досохранит то, что ещё не успел
+    // debounce автосохранения (см. persist в DiagramEditorViewModel.onBackClick). Из-за этого
+    // переименование диаграммы прямо перед системным "назад" на экране списка иногда мелькало
+    // старым именем, пока список не перечитывался заново при следующем входе. Заворачиваем тот
+    // же путь и на системный back — теперь оба способа выйти с экрана идут через один и тот же
+    // немедленный flush перед навигацией.
     BackHandler(onBack = viewModel::onBackClick)
 
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
@@ -1178,26 +1185,50 @@ private fun TableCard(
                     }
                 }
         ) {
-            Text(
-                text = table.name,
-                style = MaterialTheme.typography.titleMedium,
-                color = Color.White,
+            // Раньше высота заголовка подстраивалась под контент (padding(vertical = 9.dp) +
+            // естественная высота строки текста) и ПОЧТИ совпадала с номинальными
+            // TableHeaderDots * DotGridStep (32.dp), которыми считает геометрию tableHeight/
+            // columnCenterOffsetY ниже — пока связи упирались в центр всей карточки, разница в
+            // несколько dp была незаметна. Теперь, когда линия идёт в конкретную строку
+            // атрибута, та же разница в заголовке сдвигает буквально ВСЕ строки вниз на
+            // одну и ту же величину — и чем ниже строка, тем заметнее итоговое расхождение
+            // между нарисованной линией и реальной строкой (см. баг-репорт пользователя:
+            // линия к последнему атрибуту визуально утыкалась в предыдущий). Фиксируем высоту
+            // заголовка в точности равной тому, что уже закладывает геометрия — так же, как
+            // PDF-экспорт (см. drawTableCard в PdfDiagramExporter.kt) всегда рисовал его ровно
+            // в headerHeight = GridStepPt * TableHeaderDots, без подгона под контент.
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(accentColor)
-                    .padding(horizontal = 12.dp, vertical = 9.dp)
-            )
+                    .height(DotGridStep * TableHeaderDots)
+                    .background(accentColor),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Text(
+                    text = table.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+            }
 
+            // По той же причине (см. комментарий у заголовка выше) высота строки атрибута тоже
+            // зафиксирована в DotGridStep * TableRowDots, а не подстраивается под контент —
+            // иначе снова разъедется с tableHeight/columnCenterOffsetY. Разделитель между
+            // строками раньше рисовался отдельным HorizontalDivider() — своей композицией со
+            // своей высотой (пусть и в 1.dp, но она тоже накапливалась от строки к строке и
+            // сдвигала геометрию). Теперь это нижняя линия самой строки (см. showDividerBelow
+            // в FieldRow) — нулевой высоты, рисуется поверх уже выделенного под строку места.
             table.columns.forEachIndexed { index, column ->
-                if (index > 0) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-                }
                 key(column.id) {
                     FieldRow(
                         column = column,
                         isEditable = showEditAffordances,
                         isLinkable = allowColumnLinkTaps,
                         isLinkSource = linkingSourceColumnId == column.id,
+                        showDividerBelow = index != table.columns.lastIndex,
                         onClick = {
                             if (showEditAffordances) onColumnClick(column.id) else onColumnLinkTap(column.id)
                         },
@@ -1246,12 +1277,18 @@ private fun FieldRow(
     // Этот атрибут уже выбран источником текущей создаваемой связи — подсвечиваем строку,
     // чтобы было видно, что именно от него сейчас тянется связь.
     isLinkSource: Boolean,
+    // Рисовать ли тонкую линию-разделитель у нижнего края строки — true для всех строк,
+    // кроме последней (см. комментарий у вызова FieldRow в TableCard про то, почему это
+    // теперь часть самой строки, а не отдельный HorizontalDivider() между строками).
+    showDividerBelow: Boolean,
     onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val dividerColor = MaterialTheme.colorScheme.outline
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(DotGridStep * TableRowDots)
             .then(
                 if (isLinkSource) {
                     Modifier.background(KeyframeDBExtendedTheme.colors.accent2Soft)
@@ -1260,7 +1297,21 @@ private fun FieldRow(
                 }
             )
             .then(if (isEditable || isLinkable) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .then(
+                if (showDividerBelow) {
+                    Modifier.drawBehind {
+                        drawLine(
+                            color = dividerColor,
+                            start = Offset(0f, size.height),
+                            end = Offset(size.width, size.height),
+                            strokeWidth = 1.dp.toPx()
+                        )
+                    }
+                } else {
+                    Modifier
+                }
+            )
+            .padding(horizontal = 12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
