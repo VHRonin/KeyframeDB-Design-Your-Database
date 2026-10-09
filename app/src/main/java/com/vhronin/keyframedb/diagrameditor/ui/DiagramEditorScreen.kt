@@ -94,6 +94,10 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.vhronin.keyframedb.diagrameditor.domain.layout.ConnectorRoute
+import com.vhronin.keyframedb.diagrameditor.domain.layout.ConnectorRouter
+import com.vhronin.keyframedb.diagrameditor.domain.layout.TableBox
+import com.vhronin.keyframedb.diagrameditor.domain.layout.traceRoundedPolyline
 import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
 import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
@@ -103,7 +107,6 @@ import com.vhronin.keyframedb.theme.KeyframeDBExtendedTheme
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
 import java.io.File
-import kotlin.math.abs
 import kotlin.math.ceil
 
 // Ширина/высота таблиц выражены в "точках" сетки, а не в произвольных dp —
@@ -914,13 +917,22 @@ private val MarkerReach = 11.dp
 private val MarkerSpread = 5.dp
 
 // Длина фиксированного горизонтального "хвостика" на выходе/входе связи — должна быть заметно
-// больше MarkerReach, чтобы маркер целиком поместился на прямом участке (см. ConnectorLines).
+// больше MarkerReach, чтобы маркер целиком поместился на прямом участке (см. ConnectorRouter).
 private val ConnectorStubLength = 20.dp
 
-// Нижняя граница смещения контрольных точек переходной кривой между хвостиками (см. controlOffset
-// в ConnectorLines) — чтобы кривая не сгибалась резко, даже если оба хвостика оказались рядом
-// и по X, и по Y.
-private val ConnectorMinCurveOffset = 24.dp
+// Минимальный зазор между линией связи и любой таблицей, который держит ConnectorRouter, —
+// должен быть меньше ConnectorStubLength (иначе конец хвостика окажется "внутри" своей таблицы).
+private val ConnectorClearance = 10.dp
+
+// Радиус скругления углов линии связи. Не больше ConnectorClearance — иначе скругление в углу
+// вокруг таблицы могло бы срезать её край.
+private val ConnectorCornerRadius = 8.dp
+
+// Примерная половина размера подписи вида связи ("1 – N" + паддинги в RelationLabel): нужна
+// ConnectorRouter, чтобы выбрать для подписи место, где она не наедет на таблицу. Те же числа
+// продублированы в PdfDiagramExporter.
+private const val RelationLabelHalfWidth = 24f
+private const val RelationLabelHalfHeight = 11f
 
 /**
  * Чья сторона связи — "один" или "много", по типу связи и тому, это конец "from" или "to".
@@ -939,14 +951,11 @@ private fun RelationshipType.isManyAt(isFromEnd: Boolean): Boolean = when (this)
  * кардинальность "один", раздвоенные ножки — "много" (третья, прямая "ножка" — сама линия связи,
  * отдельно её рисовать не нужно).
  *
- * `outward` здесь всегда СТРОГО горизонтален (см. ConnectorStubLength в ConnectorLines) — связь
- * специально построена так, что первые ConnectorStubLength от каждой таблицы идут прямо и
- * горизонтально, что бы ни было на другом конце. Раньше маркер ориентировался по касательной
- * кривой, которая тянется к цели — и если цель оказывалась близко по X, но далеко по Y (или вовсе
- * левее источника), кривая почти сразу уходила в сторону, и маркер либо повисал в стороне от
- * линии, либо уезжал так далеко, что казалось, будто его нет вовсе. Фиксированный прямой участок
- * у каждого конца убирает эту проблему полностью — маркер гарантированно виден при любом
- * взаимном расположении таблиц.
+ * `outward` здесь всегда СТРОГО горизонтален (влево или вправо — в зависимости от того, с какой
+ * стороны таблицы линия выходит/входит, см. ConnectorRouter.sidesFor) — связь специально
+ * построена так, что первые ConnectorStubLength от каждой таблицы идут прямо и горизонтально,
+ * что бы ни было на другом конце. Фиксированный прямой участок у каждого конца гарантирует,
+ * что маркер виден и стоит ровно на линии при любом взаимном расположении таблиц.
  */
 private fun DrawScope.drawCardinalityMarker(point: Offset, outward: Offset, isMany: Boolean, color: Color, strokeWidthPx: Float) {
     val reachPx = MarkerReach.toPx()
@@ -962,6 +971,61 @@ private fun DrawScope.drawCardinalityMarker(point: Offset, outward: Offset, isMa
     }
 }
 
+/** Связь вместе с уже проложенной линией — считается один раз и для линий, и для подписей. */
+private data class RoutedRelationship(val relationship: Relationship, val route: ConnectorRoute)
+
+/**
+ * Прокладывает все связи одним ConnectorRouter: он знает про ВСЕ таблицы сразу, поэтому линия
+ * обходит любую из них (а не только свои две) и выбирает сторону выхода/входа по положению
+ * таблицы на другом конце. Ту же раскладку считает и PDF-экспорт — см. PdfDiagramLayout.
+ */
+private fun routeRelationships(
+    tables: List<TableEntity>,
+    relationships: List<Relationship>,
+    tableWidths: Map<String, Dp>
+): List<RoutedRelationship> {
+    val boxes = tables.map { table ->
+        TableBox(
+            id = table.id,
+            x = table.x,
+            y = table.y,
+            width = (tableWidths[table.id] ?: TableCardMinWidth).value,
+            height = tableHeight(table.columns.size).value
+        )
+    }
+    val boxesById = boxes.associateBy { it.id }
+    val tablesById = tables.associateBy { it.id }
+    val router = ConnectorRouter(
+        boxes = boxes,
+        stubLength = ConnectorStubLength.value,
+        clearance = ConnectorClearance.value,
+        labelHalfWidth = RelationLabelHalfWidth,
+        labelHalfHeight = RelationLabelHalfHeight
+    )
+
+    return relationships.mapNotNull { relationship ->
+        val from = tablesById[relationship.fromTableId] ?: return@mapNotNull null
+        val to = tablesById[relationship.toTableId] ?: return@mapNotNull null
+        // Индекс конкретного атрибута внутри карточки — если его больше нет (удалили
+        // атрибут ещё до того, как каскадное удаление связи в ViewModel её убрало,
+        // например при отмене отдельной сериализованной правки), тихо пропускаем связь,
+        // как и раньше пропускали связи на несуществующие таблицы.
+        val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
+        val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
+        if (fromColumnIndex == -1 || toColumnIndex == -1) return@mapNotNull null
+
+        RoutedRelationship(
+            relationship = relationship,
+            route = router.route(
+                from = boxesById.getValue(from.id),
+                fromY = from.y + columnCenterOffsetY(fromColumnIndex).value,
+                to = boxesById.getValue(to.id),
+                toY = to.y + columnCenterOffsetY(toColumnIndex).value
+            )
+        )
+    }
+}
+
 @Composable
 private fun ConnectorLines(
     tables: List<TableEntity>,
@@ -969,73 +1033,41 @@ private fun ConnectorLines(
     tableWidths: Map<String, Dp>,
     onRelationshipClick: ((relationshipId: String) -> Unit)?
 ) {
-    val density = LocalDensity.current
     val lineColor = MaterialTheme.colorScheme.primary
-    val tablesById = tables.associateBy { it.id }
+    val routed = remember(tables, relationships, tableWidths) {
+        routeRelationships(tables, relationships, tableWidths)
+    }
 
     Canvas(modifier = Modifier.fillMaxSize()) {
         val strokeWidthPx = 2.dp.toPx()
-        val stubLenPx = ConnectorStubLength.toPx()
-        relationships.forEach { relationship ->
-            val from = tablesById[relationship.fromTableId] ?: return@forEach
-            val to = tablesById[relationship.toTableId] ?: return@forEach
-            // Индекс конкретного атрибута внутри карточки — если его больше нет (удалили
-            // атрибут ещё до того, как каскадное удаление связи в ViewModel её убрало,
-            // например при отмене отдельной сериализованной правки), тихо пропускаем связь,
-            // как и раньше пропускали связи на несуществующие таблицы.
-            val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
-            val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
-            if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
-            val fromWidth = tableWidths[from.id] ?: TableCardMinWidth
-
-            val start = with(density) {
-                Offset(
-                    x = (from.x.dp + fromWidth).toPx(),
-                    y = (from.y.dp + columnCenterOffsetY(fromColumnIndex)).toPx()
-                )
-            }
-            val end = with(density) {
-                Offset(
-                    x = to.x.dp.toPx(),
-                    y = (to.y.dp + columnCenterOffsetY(toColumnIndex)).toPx()
-                )
-            }
-
-            // Фиксированный горизонтальный "хвостик" на выходе из from и на входе в to — независимо
-            // от того, где на самом деле стоит вторая таблица (даже если она левее первой или сильно
-            // смещена по Y). Между концами хвостиков — плавная S-кривая к цели.
-            val stubOut = Offset(start.x + stubLenPx, start.y)
-            val stubIn = Offset(end.x - stubLenPx, end.y)
-
-            // Смещение контрольных точек считаем от БОЛЬШЕГО из dx/dy между хвостиками, а не только
-            // от dx: если таблицы стоят близко по X, но далеко по Y, dx между хвостиками может
-            // оказаться совсем маленьким (или даже отрицательным) — и кривая, опираясь только на
-            // него, сгибалась почти в одной точке резким изломом вместо плавного разворота вниз.
-            // Учитывая и dy, кривая всегда получает достаточный "разбег" перед поворотом к цели.
-            val dx = stubIn.x - stubOut.x
-            val dy = stubIn.y - stubOut.y
-            val controlOffset = maxOf(abs(dx) * 0.6f, abs(dy) * 0.4f, ConnectorMinCurveOffset.toPx())
-            val midControl1 = Offset(stubOut.x + controlOffset, stubOut.y)
-            val midControl2 = Offset(stubIn.x - controlOffset, stubIn.y)
-
-            val path = Path().apply {
-                moveTo(start.x, start.y)
-                lineTo(stubOut.x, stubOut.y)
-                cubicTo(midControl1.x, midControl1.y, midControl2.x, midControl2.y, stubIn.x, stubIn.y)
-                lineTo(end.x, end.y)
-            }
+        // Роутер считает в dp (как и координаты таблиц), а рисуем в пикселях.
+        val pxPerDp = 1.dp.toPx()
+        val cornerRadiusDp = ConnectorCornerRadius.value
+        routed.forEach { (relationship, route) ->
+            val path = Path()
+            traceRoundedPolyline(
+                points = route.points,
+                radius = cornerRadiusDp,
+                moveTo = { x, y -> path.moveTo(x * pxPerDp, y * pxPerDp) },
+                lineTo = { x, y -> path.lineTo(x * pxPerDp, y * pxPerDp) },
+                quadTo = { cx, cy, x, y ->
+                    path.quadraticBezierTo(cx * pxPerDp, cy * pxPerDp, x * pxPerDp, y * pxPerDp)
+                }
+            )
             drawPath(path = path, color = lineColor, style = Stroke(width = strokeWidthPx))
 
+            val start = route.points.first()
+            val end = route.points.last()
             drawCardinalityMarker(
-                point = start,
-                outward = Offset(1f, 0f),
+                point = Offset(start.x * pxPerDp, start.y * pxPerDp),
+                outward = Offset(route.fromSide.outwardX, 0f),
                 isMany = relationship.type.isManyAt(isFromEnd = true),
                 color = lineColor,
                 strokeWidthPx = strokeWidthPx
             )
             drawCardinalityMarker(
-                point = end,
-                outward = Offset(-1f, 0f),
+                point = Offset(end.x * pxPerDp, end.y * pxPerDp),
+                outward = Offset(route.toSide.outwardX, 0f),
                 isMany = relationship.type.isManyAt(isFromEnd = false),
                 color = lineColor,
                 strokeWidthPx = strokeWidthPx
@@ -1047,20 +1079,15 @@ private fun ConnectorLines(
     // произвольная строка, а короткая метка перечисления RelationshipType. Тап по ней открывает
     // BottomSheet смены вида/удаления связи (см. onRelationshipBadgeClick), кроме как во время
     // самого связывания — тогда onRelationshipClick приходит null и подпись не реагирует на тап.
-    relationships.forEach { relationship ->
-        val from = tablesById[relationship.fromTableId] ?: return@forEach
-        val to = tablesById[relationship.toTableId] ?: return@forEach
-        val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
-        val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
-        if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
-        val fromWidth = tableWidths[from.id] ?: TableCardMinWidth
-        val midX = (from.x + fromWidth.value + to.x) / 2f
-        val midY = (from.y + columnCenterOffsetY(fromColumnIndex).value +
-                to.y + columnCenterOffsetY(toColumnIndex).value) / 2f + 12f
+    // Ставится по центру отрезка проложенной линии (см. ConnectorRoute.labelCenter).
+    routed.forEach { (relationship, route) ->
         RelationLabel(
             text = relationship.type.shortLabel,
             onClick = onRelationshipClick?.let { onClick -> { onClick(relationship.id) } },
-            modifier = Modifier.offset(x = midX.dp, y = midY.dp)
+            modifier = Modifier.offset(
+                x = (route.labelCenter.x - RelationLabelHalfWidth).dp,
+                y = (route.labelCenter.y - RelationLabelHalfHeight).dp
+            )
         )
     }
 }

@@ -8,7 +8,12 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
+import com.vhronin.keyframedb.diagrameditor.domain.layout.ConnectorRoute
+import com.vhronin.keyframedb.diagrameditor.domain.layout.ConnectorRouter
+import com.vhronin.keyframedb.diagrameditor.domain.layout.TableBox
+import com.vhronin.keyframedb.diagrameditor.domain.layout.traceRoundedPolyline
 import com.vhronin.keyframedb.diagrameditor.domain.model.Diagram
+import com.vhronin.keyframedb.diagrameditor.domain.model.Relationship
 import com.vhronin.keyframedb.diagrameditor.domain.model.RelationshipType
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableColor
 import com.vhronin.keyframedb.diagrameditor.domain.model.TableEntity
@@ -20,7 +25,6 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.math.ceil
 
 /**
@@ -88,8 +92,8 @@ class PdfDiagramExporter(
         canvas.translate(layout.contentOffsetX, layout.contentOffsetY)
         // Порядок как в DiagramCanvas/ConnectorLines в Compose: линии связей — под подписями,
         // подписи — под карточками таблиц, карточки — сверху всего.
-        drawConnectors(canvas, diagram, layout, paints)
-        drawRelationshipLabels(canvas, diagram, layout, paints)
+        drawConnectors(canvas, layout, paints)
+        drawRelationshipLabels(canvas, layout, paints)
         diagram.tables.forEach { table -> drawTableCard(canvas, table, layout.widthOf(table), paints) }
         canvas.restore()
     }
@@ -119,53 +123,38 @@ class PdfDiagramExporter(
         }
     }
 
-    private fun drawConnectors(canvas: Canvas, diagram: Diagram, layout: PdfDiagramLayout, paints: PdfPaints) {
-        val tablesById = diagram.tables.associateBy { it.id }
-        diagram.relationships.forEach { relationship ->
-            val from = tablesById[relationship.fromTableId] ?: return@forEach
-            val to = tablesById[relationship.toTableId] ?: return@forEach
-            val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
-            val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
-            if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
-            val fromWidth = layout.widthOf(from)
-
-            val start = Pt(from.x + fromWidth, from.y + columnCenterOffsetY(fromColumnIndex))
-            val end = Pt(to.x, to.y + columnCenterOffsetY(toColumnIndex))
-
-            // Фиксированный горизонтальный "хвостик" на выходе из from и на входе в to — та же
-            // логика, что и в ConnectorLines в DiagramEditorScreen.kt (см. комментарий у
-            // drawCardinalityMarker там же): независимо от того, где на самом деле стоит вторая
-            // таблица, первые ConnectorStubPt связь идёт прямо и строго горизонтально, и только
-            // между концами хвостиков плавно поворачивает к цели.
-            val stubOut = Pt(start.x + ConnectorStubPt, start.y)
-            val stubIn = Pt(end.x - ConnectorStubPt, end.y)
-
-            // Смещение контрольных точек — от БОЛЬШЕГО из dx/dy между хвостиками, а не только от
-            // dx (та же логика и то же обоснование, что и в ConnectorLines в DiagramEditorScreen.kt).
-            val dx = stubIn.x - stubOut.x
-            val dy = stubIn.y - stubOut.y
-            val controlOffset = maxOf(abs(dx) * 0.6f, abs(dy) * 0.4f, ConnectorMinCurveOffsetPt)
-            val midControl1 = Pt(stubOut.x + controlOffset, stubOut.y)
-            val midControl2 = Pt(stubIn.x - controlOffset, stubIn.y)
-
-            val path = Path().apply {
-                moveTo(start.x, start.y)
-                lineTo(stubOut.x, stubOut.y)
-                cubicTo(midControl1.x, midControl1.y, midControl2.x, midControl2.y, stubIn.x, stubIn.y)
-                lineTo(end.x, end.y)
-            }
+    private fun drawConnectors(canvas: Canvas, layout: PdfDiagramLayout, paints: PdfPaints) {
+        // Линии уже проложены в PdfDiagramLayout тем же ConnectorRouter, что и на холсте
+        // (см. routeRelationships в DiagramEditorScreen.kt) — здесь только рисуем.
+        layout.routes.forEach { (relationship, route) ->
+            val path = Path()
+            traceRoundedPolyline(
+                points = route.points,
+                radius = ConnectorCornerRadiusPt,
+                moveTo = { x, y -> path.moveTo(x, y) },
+                lineTo = { x, y -> path.lineTo(x, y) },
+                quadTo = { cx, cy, x, y -> path.quadTo(cx, cy, x, y) }
+            )
             canvas.drawPath(path, paints.connectorLine)
 
-            drawCardinalityMarker(canvas, start, Pt(1f, 0f), relationship.type.isManyAt(isFromEnd = true), paints.connectorLine)
-            drawCardinalityMarker(canvas, end, Pt(-1f, 0f), relationship.type.isManyAt(isFromEnd = false), paints.connectorLine)
+            val start = route.points.first()
+            val end = route.points.last()
+            drawCardinalityMarker(
+                canvas, Pt(start.x, start.y), Pt(route.fromSide.outwardX, 0f),
+                relationship.type.isManyAt(isFromEnd = true), paints.connectorLine
+            )
+            drawCardinalityMarker(
+                canvas, Pt(end.x, end.y), Pt(route.toSide.outwardX, 0f),
+                relationship.type.isManyAt(isFromEnd = false), paints.connectorLine
+            )
         }
     }
 
     /**
      * Та же ER-нотация "вороньей лапки", что и на холсте (см. drawCardinalityMarker в
      * DiagramEditorScreen.kt): одна перпендикулярная чёрточка — "один", раздвоенные ножки — "много".
-     * `outward` здесь всегда строго горизонтален — гарантирован фиксированным хвостиком связи
-     * (см. ConnectorStubPt в drawConnectors).
+     * `outward` здесь всегда строго горизонтален (влево/вправо по стороне таблицы) — гарантирован
+     * фиксированным хвостиком связи (см. ConnectorStubPt).
      */
     private fun drawCardinalityMarker(canvas: Canvas, point: Pt, outward: Pt, isMany: Boolean, linePaint: Paint) {
         val perp = Pt(-outward.y, outward.x)
@@ -183,29 +172,17 @@ class PdfDiagramExporter(
         }
     }
 
-    private fun drawRelationshipLabels(canvas: Canvas, diagram: Diagram, layout: PdfDiagramLayout, paints: PdfPaints) {
-        val tablesById = diagram.tables.associateBy { it.id }
-        diagram.relationships.forEach { relationship ->
-            val from = tablesById[relationship.fromTableId] ?: return@forEach
-            val to = tablesById[relationship.toTableId] ?: return@forEach
-            val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
-            val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
-            if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
-            val fromWidth = layout.widthOf(from)
-
-            val chipLeft = (from.x + fromWidth + to.x) / 2f
-            val chipTop = (from.y + columnCenterOffsetY(fromColumnIndex) +
-                    to.y + columnCenterOffsetY(toColumnIndex)) / 2f + 12f
-
+    private fun drawRelationshipLabels(canvas: Canvas, layout: PdfDiagramLayout, paints: PdfPaints) {
+        layout.routes.forEach { (relationship, route) ->
             val text = relationship.type.shortLabel
             val fm = paints.relationLabel.fontMetrics
             val textWidth = paints.relationLabel.measureText(text)
-            val chipRect = RectF(
-                chipLeft,
-                chipTop,
-                chipLeft + textWidth + LabelHorizontalPaddingPt * 2,
-                chipTop + (fm.descent - fm.ascent) + LabelVerticalPaddingPt * 2
-            )
+            val chipWidth = textWidth + LabelHorizontalPaddingPt * 2
+            val chipHeight = (fm.descent - fm.ascent) + LabelVerticalPaddingPt * 2
+            // Подпись центрируется на выбранной роутером точке линии (см. ConnectorRoute.labelCenter).
+            val chipLeft = route.labelCenter.x - chipWidth / 2f
+            val chipTop = route.labelCenter.y - chipHeight / 2f
+            val chipRect = RectF(chipLeft, chipTop, chipLeft + chipWidth, chipTop + chipHeight)
 
             canvas.drawRoundRect(chipRect, LabelCornerRadiusPt, LabelCornerRadiusPt, paints.relationLabelBackground)
             canvas.drawRoundRect(chipRect, LabelCornerRadiusPt, LabelCornerRadiusPt, paints.relationLabelBorder)
@@ -358,52 +335,85 @@ private class PdfDiagramLayout(diagram: Diagram, paints: PdfPaints) {
     val contentOffsetX: Float
     val contentOffsetY: Float
 
+    /** Проложенные связи — считаем один раз: по ним же строится и bounding box страницы. */
+    val routes: List<PdfRoutedRelationship>
+
     init {
+        routes = routeRelationships(diagram)
         if (diagram.tables.isEmpty()) {
             pageWidthPt = EmptyPageWidthPt
             pageHeightPt = EmptyPageHeightPt
             contentOffsetX = 0f
             contentOffsetY = 0f
         } else {
-            val tablesById = diagram.tables.associateBy { it.id }
             var minX = diagram.tables.minOf { it.x }
-            val minY = diagram.tables.minOf { it.y }
+            var minY = diagram.tables.minOf { it.y }
             var maxX = diagram.tables.maxOf { it.x + (widths[it.id] ?: TableCardMinWidthPt) }
             var maxY = diagram.tables.maxOf { it.y + tableHeight(it.columns.size) }
 
-            // Подпись связи может высунуться за нижний/правый край крайних таблиц (см. midY в
-            // ConnectorLines), а переходная кривая между хвостиками (см. controlOffset в
-            // drawConnectors) — за левый/правый: расширяем bounding box под них, а не обрезаем.
-            // Смещение контрольных точек само может оказаться больше ConnectorStubPt (оно растёт и
-            // от перепада по Y), поэтому считаем его так же, как и при самой отрисовке связи.
-            diagram.relationships.forEach { relationship ->
-                val from = tablesById[relationship.fromTableId] ?: return@forEach
-                val to = tablesById[relationship.toTableId] ?: return@forEach
-                val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
-                val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
-                if (fromColumnIndex == -1 || toColumnIndex == -1) return@forEach
-                val fromWidth = widths[from.id] ?: TableCardMinWidthPt
-                val chipLeft = (from.x + fromWidth + to.x) / 2f
-                val chipTop = (from.y + columnCenterOffsetY(fromColumnIndex) +
-                        to.y + columnCenterOffsetY(toColumnIndex)) / 2f + 12f
-                maxY = maxOf(maxY, chipTop + RelationLabelHeightEstimatePt)
-
-                val startX = from.x + fromWidth
-                val startY = from.y + columnCenterOffsetY(fromColumnIndex)
-                val endX = to.x
-                val endY = to.y + columnCenterOffsetY(toColumnIndex)
-                val stubOutX = startX + ConnectorStubPt
-                val stubInX = endX - ConnectorStubPt
-                val controlOffset = maxOf(abs(stubInX - stubOutX) * 0.6f, abs(endY - startY) * 0.4f, ConnectorMinCurveOffsetPt)
-
-                maxX = maxOf(maxOf(maxX, chipLeft + RelationLabelWidthEstimatePt), maxOf(stubOutX + controlOffset, stubInX))
-                minX = minOf(minX, stubInX - controlOffset, stubOutX)
+            // Линии обходят таблицы снаружи и могут выйти за крайние из них (во все стороны), а
+            // подписи — высунуться за линию: расширяем bounding box под точки каждой проложенной
+            // линии и под подпись, а не обрезаем.
+            routes.forEach { (_, route) ->
+                route.points.forEach { p ->
+                    minX = minOf(minX, p.x)
+                    maxX = maxOf(maxX, p.x)
+                    minY = minOf(minY, p.y)
+                    maxY = maxOf(maxY, p.y)
+                }
+                minX = minOf(minX, route.labelCenter.x - RelationLabelWidthEstimatePt / 2f)
+                maxX = maxOf(maxX, route.labelCenter.x + RelationLabelWidthEstimatePt / 2f)
+                minY = minOf(minY, route.labelCenter.y - RelationLabelHeightEstimatePt / 2f)
+                maxY = maxOf(maxY, route.labelCenter.y + RelationLabelHeightEstimatePt / 2f)
             }
 
             pageWidthPt = (maxX - minX) + PageMarginPt * 2
             pageHeightPt = (maxY - minY) + PageMarginPt * 2 + TitleAreaHeightPt
             contentOffsetX = PageMarginPt - minX
             contentOffsetY = PageMarginPt + TitleAreaHeightPt - minY
+        }
+    }
+
+    /**
+     * Прокладывает связи тем же ConnectorRouter и с теми же параметрами, что и routeRelationships
+     * в DiagramEditorScreen.kt — иначе линии в PDF разъехались бы с тем, что на экране.
+     */
+    private fun routeRelationships(diagram: Diagram): List<PdfRoutedRelationship> {
+        val boxes = diagram.tables.map { table ->
+            TableBox(
+                id = table.id,
+                x = table.x,
+                y = table.y,
+                width = widths[table.id] ?: TableCardMinWidthPt,
+                height = tableHeight(table.columns.size)
+            )
+        }
+        val boxesById = boxes.associateBy { it.id }
+        val tablesById = diagram.tables.associateBy { it.id }
+        val router = ConnectorRouter(
+            boxes = boxes,
+            stubLength = ConnectorStubPt,
+            clearance = ConnectorClearancePt,
+            labelHalfWidth = RelationLabelWidthEstimatePt / 2f,
+            labelHalfHeight = RelationLabelHeightEstimatePt / 2f
+        )
+
+        return diagram.relationships.mapNotNull { relationship ->
+            val from = tablesById[relationship.fromTableId] ?: return@mapNotNull null
+            val to = tablesById[relationship.toTableId] ?: return@mapNotNull null
+            val fromColumnIndex = from.columns.indexOfFirst { it.id == relationship.fromColumnId }
+            val toColumnIndex = to.columns.indexOfFirst { it.id == relationship.toColumnId }
+            if (fromColumnIndex == -1 || toColumnIndex == -1) return@mapNotNull null
+
+            PdfRoutedRelationship(
+                relationship = relationship,
+                route = router.route(
+                    from = boxesById.getValue(from.id),
+                    fromY = from.y + columnCenterOffsetY(fromColumnIndex),
+                    to = boxesById.getValue(to.id),
+                    toY = to.y + columnCenterOffsetY(toColumnIndex)
+                )
+            )
         }
     }
 
@@ -492,6 +502,8 @@ private const val GridStepPt = 16f
 private const val TableHeaderDots = 2
 private const val TableRowDots = 2
 private const val TableWidthDots = 9
+private data class PdfRoutedRelationship(val relationship: Relationship, val route: ConnectorRoute)
+
 private val TableCardMinWidthPt = GridStepPt * TableWidthDots
 
 private const val CardHorizontalPaddingPt = 12f
@@ -505,8 +517,8 @@ private const val CardCornerRadiusPt = 13f
 private const val LabelHorizontalPaddingPt = 6f
 private const val LabelVerticalPaddingPt = 2f
 private const val LabelCornerRadiusPt = 8f
-private const val RelationLabelWidthEstimatePt = 48f
-private const val RelationLabelHeightEstimatePt = 20f
+private const val RelationLabelWidthEstimatePt = 48f // = 2 * RelationLabelHalfWidth на холсте
+private const val RelationLabelHeightEstimatePt = 22f // = 2 * RelationLabelHalfHeight на холсте
 
 // Размер маркера кардинальности ("1"/"N" на конце связи) — те же числа, что MarkerReach/MarkerSpread
 // в DiagramEditorScreen.kt, чтобы отметка не разъезжалась между экраном и PDF.
@@ -515,9 +527,10 @@ private const val MarkerSpreadPt = 5f
 // Длина фиксированного горизонтального "хвостика" связи на выходе/входе — то же самое
 // ConnectorStubLength в DiagramEditorScreen.kt; должна быть заметно больше MarkerReachPt.
 private const val ConnectorStubPt = 20f
-// Нижняя граница смещения контрольных точек переходной кривой между хвостиками — то же самое
-// ConnectorMinCurveOffset в DiagramEditorScreen.kt.
-private const val ConnectorMinCurveOffsetPt = 24f
+// Зазор между линией связи и таблицами и радиус скругления её углов — те же числа, что
+// ConnectorClearance / ConnectorCornerRadius в DiagramEditorScreen.kt.
+private const val ConnectorClearancePt = 10f
+private const val ConnectorCornerRadiusPt = 8f
 private const val DotGridRadiusPt = 1.1f
 private const val MaxDotGridAreaPt2 = 6_000_000f
 

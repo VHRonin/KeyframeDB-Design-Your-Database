@@ -290,7 +290,17 @@ class DiagramEditorViewModel(
             // Раскладываем новые таблицы небольшой "лесенкой", чтобы не ставить их
             // ровно друг на друга — а дальше пользователь просто перетащит куда нужно.
             x = 16f + (index % 4) * 32f,
-            y = 16f + (index / 4) * 32f
+            y = 16f + (index / 4) * 32f,
+            // Первичный ключ "id" создаётся сразу — у каждой таблицы он нужен, а связям
+            // всё равно нужен атрибут, к которому крепиться. Удалить/переименовать можно как обычный.
+            columns = listOf(
+                TableColumn(
+                    id = UUID.randomUUID().toString(),
+                    name = "id",
+                    type = "",
+                    isPrimaryKey = true
+                )
+            )
         )
         _uiState.value = _uiState.value.copy(tables = _uiState.value.tables + newTable)
     }
